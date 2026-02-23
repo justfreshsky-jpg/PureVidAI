@@ -1,10 +1,12 @@
-import os, traceback, base64
+import os, traceback, base64, time
+import requests
 from flask import Flask, request, jsonify, render_template_string
 from groq import Groq
 
 app = Flask(__name__)
 
 GROQ_KEY = os.environ.get("GROQ_KEY")
+FAL_KEY = os.environ.get("FAL_KEY")  # fal.ai hosts CogVideoX free
 client = Groq(api_key=GROQ_KEY) if GROQ_KEY else None
 
 UNSAFE = ["nudity","naked","violence","blood","kill","alcohol","drugs","gambling","weapon","gore","nsfw","sexy","adult"]
@@ -97,7 +99,7 @@ HTML = """<!DOCTYPE html>
   <!-- GENERATE -->
   <div id="generate" class="tab active"><div class="card">
     <h2>🎬 Generate a Video</h2>
-    <p class="hint">Describe what you want → PureVid AI generates a real video using Wan2.1. Always family-safe. Takes 4–8 minutes.</p>
+    <p class="hint">Describe what you want → PureVid AI generates a real video using CogVideoX. Always family-safe. Takes 2–4 minutes.</p>
     <hr>
     <div class="field">
       <label>What do you want in your video?</label>
@@ -259,14 +261,14 @@ async function generateVideo(){
   const steps=[
     "🛡️ Checking safety...",
     "🤖 Enhancing your prompt with AI...",
-    "📡 Connecting to video AI...",
-    "🎬 Generating video frames... (this takes 4–8 min, please wait)",
+    "📡 Connecting to CogVideoX...",
+    "🎬 Generating video frames... (2–4 min, please wait)",
     "🎞️ Composing final video...",
     "📦 Almost ready..."
   ];
   let si=0;
   status.innerHTML=steps[si++];
-  const stepTick=setInterval(()=>{if(si<steps.length)status.innerHTML=steps[si++];},60000);
+  const stepTick=setInterval(()=>{if(si<steps.length)status.innerHTML=steps[si++];},50000);
   try{
     const r=await fetch("/generate_video",{
       method:"POST",
@@ -309,8 +311,6 @@ def index():
 @app.route("/generate_video", methods=["POST"])
 def generate_video():
     try:
-        import requests
-
         d = request.json
         raw_prompt = d.get("prompt", "").strip()
         ratio = d.get("ratio", "16:9")
@@ -320,30 +320,82 @@ def generate_video():
         if not is_safe(raw_prompt):
             return jsonify(error="🚫 Unsafe content detected.")
 
-        # Step 1: Enhance with Groq (if available)
+        # Enhance with Groq
         final_prompt = raw_prompt
         if client:
             try:
                 final_prompt = llm(
-                    "Expert prompt enhancer for safe AI video generation.",
-                    f"Enhance this prompt for a cinematic video suitable for all ages:\n\n{raw_prompt}\n\nAspect ratio: {ratio}"
+                    "Expert prompt enhancer for safe AI video generation. CogVideoX works best with detailed scene descriptions.",
+                    f"Enhance this for cinematic family-safe video:\n\n{raw_prompt}\n\nAspect ratio: {ratio}"
                 )
             except Exception:
-                final_prompt = raw_prompt  # fallback gracefully if Groq fails
+                final_prompt = raw_prompt
 
-        # Step 2: Simulate video generation (placeholder)
-        # In real use, you'd call your video API (e.g., Wan2.1, Replicate, etc.)
-        fake_video_bytes = base64.b64encode(b"FAKE_VIDEO_BINARY_DATA").decode("utf-8")
+        if not FAL_KEY:
+            return jsonify(error="❌ FAL_KEY missing. Get free credits at fal.ai")
 
-        # Step 3: Return simulated response
-        return jsonify(
-            prompt_used=final_prompt,
-            video_b64=fake_video_bytes,
-            video_url=None,
+        # Submit CogVideoX job via fal.ai (USA-hosted, MIT license)
+        submit = requests.post(
+            "https://queue.fal.run/fal-ai/cogvideox-5b",
+            headers={
+                "Authorization": f"Key {FAL_KEY}",
+                "Content-Type": "application/json"
+            },
+            json={
+                "prompt": final_prompt,
+                "num_frames": 49,
+                "guidance_scale": 7.0,
+                "num_inference_steps": 50,
+                "video_size": {
+                    "width": 1360 if ratio == "16:9" else 768 if ratio == "1:1" else 768,
+                    "height": 768 if ratio == "16:9" else 768 if ratio == "1:1" else 1360
+                }
+            },
+            timeout=30
         )
 
+        if submit.status_code not in [200, 201]:
+            return jsonify(error=f"Submission failed: {submit.text}")
+
+        request_id = submit.json().get("request_id")
+        if not request_id:
+            return jsonify(error="No request ID returned.")
+
+        # Poll for result (max 10 min)
+        for _ in range(60):
+            time.sleep(10)
+            poll = requests.get(
+                f"https://queue.fal.run/fal-ai/cogvideox-5b/requests/{request_id}/status",
+                headers={"Authorization": f"Key {FAL_KEY}"},
+                timeout=15
+            )
+            result = poll.json()
+            status = result.get("status")
+
+            if status == "COMPLETED":
+                # Fetch final result
+                final = requests.get(
+                    f"https://queue.fal.run/fal-ai/cogvideox-5b/requests/{request_id}",
+                    headers={"Authorization": f"Key {FAL_KEY}"},
+                    timeout=15
+                ).json()
+                video_url = final.get("video", {}).get("url")
+                if not video_url:
+                    return jsonify(error="Video URL not found in response.")
+                return jsonify(
+                    prompt_used=final_prompt,
+                    video_url=video_url,
+                    video_b64=None
+                )
+            elif status == "FAILED":
+                return jsonify(error="Generation failed. Please try again.")
+
+        return jsonify(error="Timed out after 10 minutes. Please try again.")
+
+    except requests.exceptions.Timeout:
+        return jsonify(error="Request timed out. Please try again.")
     except Exception as e:
-        return jsonify(error=f"Server error: {traceback.format_exc()}"), 200
+        return jsonify(error=f"Server error: {str(e)}")
 
 @app.route("/gen_prompt", methods=["POST"])
 def gen_prompt():
@@ -351,7 +403,7 @@ def gen_prompt():
         d = request.json
         return jsonify(result=llm(
             "Professional AI video prompt writer. Always family-safe.",
-            f"Write AI video prompt for: {d['idea']}\nStyle:{d['style']} Mood:{d['mood']} Duration:{d['duration']}\n\n✨ MAIN PROMPT\n🎨 STYLE TAGS\n🚫 NEGATIVE PROMPT\n💡 PRO TIP"
+            f"Write AI video prompt for: {d['idea']}\\nStyle:{d['style']} Mood:{d['mood']} Duration:{d['duration']}\\n\\n✨ MAIN PROMPT\\n🎨 STYLE TAGS\\n🚫 NEGATIVE PROMPT\\n💡 PRO TIP"
         ))
     except Exception:
         return jsonify(result=f"❌ {traceback.format_exc()}"), 200
@@ -362,7 +414,7 @@ def story_to_video():
         d = request.json
         return jsonify(result=llm(
             "Professional video director. Family-safe scene prompts only.",
-            f"Break into {d['scenes']} scenes. Style:{d['style']}\nStory:{d['story']}\n\nFor each:\n🎬 SCENE [N]\n📍 Setting\n✨ AI PROMPT\n🎵 Mood"
+            f"Break into {d['scenes']} scenes. Style:{d['style']}\\nStory:{d['story']}\\n\\nFor each:\\n🎬 SCENE [N]\\n📍 Setting\\n✨ AI PROMPT\\n🎵 Mood"
         ))
     except Exception:
         return jsonify(result=f"❌ {traceback.format_exc()}"), 200
@@ -373,7 +425,7 @@ def safety_check():
         d = request.json
         return jsonify(result=llm(
             "Content safety expert.",
-            f"Audience:{d['audience']}\nPrompt:{d['prompt']}\n\n🛡️ RATING (Safe/Caution/Unsafe)\n✅ SAFE ELEMENTS\n⚠️ CONCERNS\n🔧 SAFE ALTERNATIVE"
+            f"Audience:{d['audience']}\\nPrompt:{d['prompt']}\\n\\n🛡️ RATING (Safe/Caution/Unsafe)\\n✅ SAFE ELEMENTS\\n⚠️ CONCERNS\\n🔧 SAFE ALTERNATIVE"
         ))
     except Exception:
         return jsonify(result=f"❌ {traceback.format_exc()}"), 200
@@ -384,7 +436,7 @@ def enhance_prompt():
         d = request.json
         return jsonify(result=llm(
             "Master AI prompt engineer for cinematic safe video.",
-            f"Enhance:{d['prompt']} Camera:{d['camera']} Lighting:{d['lighting']}\n\n✨ ENHANCED PROMPT\n📸 TECHNICAL DETAILS\n🎨 COLORS\n🚫 NEGATIVE PROMPT"
+            f"Enhance:{d['prompt']} Camera:{d['camera']} Lighting:{d['lighting']}\\n\\n✨ ENHANCED PROMPT\\n📸 TECHNICAL DETAILS\\n🎨 COLORS\\n🚫 NEGATIVE PROMPT"
         ))
     except Exception:
         return jsonify(result=f"❌ {traceback.format_exc()}"), 200
@@ -395,10 +447,13 @@ def gen_ideas():
         d = request.json
         return jsonify(result=llm(
             "Creative content strategist for family-safe video.",
-            f"10 safe video ideas:\nTheme:{d['theme']} Platform:{d['platform']} Audience:{d['audience']}\n\nFor each:\n💡 IDEA [N]\n📝 Concept\n✨ AI Prompt\n📈 Why it works"
+            f"10 safe video ideas:\\nTheme:{d['theme']} Platform:{d['platform']} Audience:{d['audience']}\\n\\nFor each:\\n💡 IDEA [N]\\n📝 Concept\\n✨ AI Prompt\\n📈 Why it works"
         ))
     except Exception:
         return jsonify(result=f"❌ {traceback.format_exc()}"), 200
 
 if __name__ == "__main__":
+    print("🚀 PureVid AI starting...")
+    print(f"✅ Groq: {'Ready' if client else '❌ Missing GROQ_KEY'}")
+    print(f"✅ CogVideoX: {'Ready' if FAL_KEY else '❌ Missing FAL_KEY'}")
     app.run(host="0.0.0.0", port=7860, debug=False)
