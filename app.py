@@ -295,8 +295,13 @@ hr{border:none;border-top:1px solid #e8eaf0;margin:18px 0}
 </div>
 
 <div class="footer">
-  🎥 <strong>PureVid AI</strong> &nbsp;|&nbsp; Safe AI video generator<br>
-  🔒 No data stored &nbsp;|&nbsp; ✅ Family safe always
+  🎥 <strong>PureVid AI</strong> | Safe AI video generator | 🆓 Free<br>
+  🔒 No data stored | ✅ Family safe always<br>
+  <span style="font-size:.8em;color:#94a3b8">
+    ⚠️ AI-generated content may contain errors or unexpected results. This tool is provided
+    as-is for creative purposes only. Creators are not responsible for any generated content
+    or decisions made based on AI output. Always review content before publishing.
+  </span>
 </div>
 
 <script>
