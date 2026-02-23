@@ -1,3 +1,6 @@
-flask==3.0.3
-groq==0.9.0
-requests==2.32.3
+flask
+gunicorn
+groq
+httpx==0.27.2
+requests
+beautifulsoup4
