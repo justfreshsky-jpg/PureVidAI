@@ -86,7 +86,7 @@ HTML = """<!DOCTYPE html>
 <head>
 <title>🎥 PureVid AI</title>
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<meta name="description" content="Safe AI video generator for everyone. Family-friendly, free, powered by CogVideoX.">
+<meta name="description" content="Safe AI video generator for everyone. Family-friendly and powered by CogVideoX.">
 <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
 <style>
 :root{--bd:#1a2e4a;--bm:#2563eb;--bl:#60a5fa;--pale:#f0f4ff;--border:#bfdbfe;--w:#fff;--gray:#666;--r:12px}
@@ -148,7 +148,6 @@ hr{border:none;border-top:1px solid #e8eaf0;margin:18px 0}
     <span class="badge">🔒 No Data Stored</span>
     <span class="badge">🎬 Real Video Generation</span>
     <span class="badge">⚡ Powered by CogVideoX</span>
-    <span class="badge">🆓 Free</span>
   </div>
 </div>
 
@@ -295,7 +294,7 @@ hr{border:none;border-top:1px solid #e8eaf0;margin:18px 0}
 </div>
 
 <div class="footer">
-  🎥 <strong>PureVid AI</strong> | Safe AI video generator | 🆓 Free<br>
+  🎥 <strong>PureVid AI</strong> | Safe AI video generator <br>
   🔒 No data stored | ✅ Family safe always<br>
   <span style="font-size:.8em;color:#94a3b8">
     ⚠️ AI-generated content may contain errors or unexpected results. This tool is provided
