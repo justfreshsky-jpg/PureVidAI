@@ -78,7 +78,13 @@ def llm(system, user):
         max_tokens=1200,
         temperature=0.7
     )
-    return r.choices[0].message.content
+    
+    # ** bold temizle + garip karakterler
+    text = r.choices[0].message.content
+    text = text.replace('**', '')  # **word** → word
+    text = ''.join(c for c in text if ord(c) < 128)  # Sadece ASCII
+    
+    return text.strip()
 
 # ── HTML ─────────────────────────────────────────────────────
 HTML = """<!DOCTYPE html>
