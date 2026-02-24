@@ -70,19 +70,36 @@ def get_context():
 # ── LLM ─────────────────────────────────────────────────────
 def llm(system, user):
     if not client:
-        return "❌ GROQ_KEY missing. Add it in Render > Environment Variables."
-    full_system = system + "\n\nReference data:\n" + get_context()
+        return "❌ GROQ_KEY missing."
+    
+    # USA immigrant guide instruction with emojis
+    usa_prompt = """
+    🇺🇸 USA IMMIGRANT GUIDE ONLY
+    ✅ VISA / SSN / BANK / HOUSING / UBER / TAX / HEALTH
+    • Emojis: ✅ 🚀 💰 📱 🏠 🪪 ✈️ 🏥 💳 
+    • IMPORTANT words in UPPERCASE
+    • Short paragraphs, long lists
+    ⚠️ USA / NJ / NY ONLY!
+    """
+    
+    full_system = system + "\n\n" + usa_prompt + "\n\nBlog data:\n" + get_context()
+    
     r = client.chat.completions.create(
         model="llama-3.3-70b-versatile",
         messages=[{"role":"system","content":full_system},{"role":"user","content":user}],
-        max_tokens=1200,
-        temperature=0.7
+        max_tokens=2000, temperature=0.6
     )
     
-    # ** bold temizle + garip karakterler
     text = r.choices[0].message.content
-    text = text.replace('**', '')  # **word** → word
-    text = ''.join(c for c in text if ord(c) < 128)  # Sadece ASCII
+    text = text.replace('**', '')  # Remove bold markdown
+    
+    # Keep emojis + Turkish/English characters
+    text = ''.join(c for c in text 
+                   if (ord(c) < 128 or c in 'ğüşıöçĞÜŞİÖÇ' or
+                       0x1F600 <= ord(c) <= 0x1F64F or  # Emoticons
+                       0x1F300 <= ord(c) <= 0x1F5FF or  # Symbols
+                       0x1F680 <= ord(c) <= 0x1F6FF or  # Transport
+                       0x1F900 <= ord(c) <= 0x1F9FF))   # People
     
     return text.strip()
 
