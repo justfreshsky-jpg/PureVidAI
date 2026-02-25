@@ -13,6 +13,9 @@ FAL_KEY = os.environ.get("FAL_KEY")
 VERTEX_PROJECT_ID = os.environ.get("VERTEX_PROJECT_ID") or os.environ.get("GOOGLE_CLOUD_PROJECT")
 VERTEX_LOCATION = os.environ.get("VERTEX_LOCATION", "us-central1")
 VERTEX_MODEL = os.environ.get("VERTEX_MODEL", "gemini-1.5-flash")
+VIDEO_PROVIDER = os.environ.get("VIDEO_PROVIDER", "google").lower()  # google|fal
+VERTEX_VIDEO_MODEL = os.environ.get("VERTEX_VIDEO_MODEL", "veo-2.0-generate-001")
+ALLOW_FAL_FALLBACK = os.environ.get("ALLOW_FAL_FALLBACK", "false").lower() == "true"
 client = Groq(api_key=GROQ_KEY) if GROQ_KEY else None
 
 UNSAFE = ["nudity","naked","violence","blood","kill","alcohol","drugs","gambling","weapon","gore","nsfw","sexy","adult","explicit","hate","terrorist"]
@@ -140,7 +143,7 @@ def _groq_llm(full_system, user):
 def llm(system, user):
     educator_prompt = """
     🎓 EDUCATOR-FIRST CREATIVE ASSISTANT
-    ✅ Produce clear outputs teachers can use quickly for any subject.
+    ✅ Produce clear outputs teachers can use quickly in real classrooms.
     ✅ Include grade-level options, activity ideas, and assessment-friendly suggestions.
     ✅ Keep tone practical, classroom-safe, and globally usable.
     ✅ Avoid violence, explicit, hateful, or unsafe content.
@@ -159,7 +162,7 @@ def llm(system, user):
     if client:
         return _groq_llm(full_system, user)
 
-    return "❌ Missing AI config. Set VERTEX_PROJECT_ID (recommended for Google Cloud credits) or GROQ_KEY."
+    return "❌ Missing AI config. Set VERTEX_PROJECT_ID (or GOOGLE_CLOUD_PROJECT) or GROQ_KEY."
 
 # ── HTML ─────────────────────────────────────────────────────
 HTML = """<!DOCTYPE html>
@@ -223,7 +226,7 @@ hr{border:none;border-top:1px solid #e8eaf0;margin:18px 0}
 <body>
 <div class="header">
   <h1>🎥 PureVid AI</h1>
-  <p><b>Educator-ready AI videos and teaching content for any subject</b></p>
+  <p><b>Beautiful, classroom-ready AI videos and teaching content for educators</b></p>
   <div class="badges">
     <span class="badge">✅ Classroom Safe</span>
     <span class="badge">🔒 No Data Stored</span>
@@ -478,6 +481,71 @@ async function generateVideo(){
 </body>
 </html>"""
 
+def _get_google_auth_token():
+    try:
+        import google.auth
+        from google.auth.transport.requests import Request as GoogleAuthRequest
+    except ImportError as exc:
+        raise RuntimeError("google-auth package is required for Google Cloud mode.") from exc
+
+    creds, _ = google.auth.default(scopes=["https://www.googleapis.com/auth/cloud-platform"])
+    creds.refresh(GoogleAuthRequest())
+    return creds.token
+
+
+def _vertex_generate_video(prompt, ratio):
+    if not VERTEX_PROJECT_ID:
+        raise RuntimeError("Google Cloud project is not configured. Set VERTEX_PROJECT_ID or GOOGLE_CLOUD_PROJECT.")
+
+    ratio_map = {"16:9": "16:9", "9:16": "9:16", "1:1": "1:1"}
+    token = _get_google_auth_token()
+    endpoint = (
+        f"https://{VERTEX_LOCATION}-aiplatform.googleapis.com/v1/projects/"
+        f"{VERTEX_PROJECT_ID}/locations/{VERTEX_LOCATION}/publishers/google/models/"
+        f"{VERTEX_VIDEO_MODEL}:predictLongRunning"
+    )
+    payload = {
+        "instances": [{
+            "prompt": prompt,
+            "aspectRatio": ratio_map.get(ratio, "16:9")
+        }]
+    }
+    submit = requests.post(
+        endpoint,
+        headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json"},
+        json=payload,
+        timeout=40,
+    )
+    if submit.status_code not in (200, 201):
+        raise RuntimeError(f"Google video submission failed: {submit.text[:400]}")
+
+    operation_name = submit.json().get("name")
+    if not operation_name:
+        raise RuntimeError("Google video operation name was not returned.")
+
+    for _ in range(60):
+        time.sleep(10)
+        poll = requests.get(
+            f"https://{VERTEX_LOCATION}-aiplatform.googleapis.com/v1/{operation_name}",
+            headers={"Authorization": f"Bearer {token}"},
+            timeout=20,
+        )
+        if poll.status_code != 200:
+            continue
+        data = poll.json()
+        if data.get("done"):
+            if data.get("error"):
+                raise RuntimeError(f"Google video generation failed: {data['error']}")
+            response = data.get("response", {})
+            for pred in response.get("predictions", []):
+                uri = pred.get("video", {}).get("uri") or pred.get("videoUri")
+                if uri:
+                    return uri
+            raise RuntimeError("Google video generation completed but no video URI was returned.")
+
+    raise RuntimeError("Google video generation timed out.")
+
+
 # ── ROUTES ───────────────────────────────────────────────────
 @app.route("/")
 def index():
@@ -486,7 +554,7 @@ def index():
 @app.route("/generate_video", methods=["POST"])
 def generate_video():
     try:
-        d = request.json
+        d = request.json or {}
         raw_prompt = d.get("prompt", "").strip()
         ratio = d.get("ratio", "16:9")
 
@@ -495,7 +563,6 @@ def generate_video():
         if not is_safe(raw_prompt):
             return jsonify(error="🚫 Unsafe content detected. Please use family-friendly descriptions.")
 
-        # Enhance with AI (Vertex AI preferred, Groq fallback)
         final_prompt = raw_prompt
         if client or VERTEX_PROJECT_ID:
             try:
@@ -506,62 +573,73 @@ def generate_video():
             except Exception:
                 final_prompt = raw_prompt
 
-        if not FAL_KEY:
-            return jsonify(error="❌ FAL_KEY missing. Get free credits at fal.ai and add to Render > Environment Variables.")
+        provider = VIDEO_PROVIDER
+        if provider == "google":
+            try:
+                video_url = _vertex_generate_video(final_prompt, ratio)
+                return jsonify(prompt_used=final_prompt, video_url=video_url, video_b64=None, provider="google")
+            except Exception as ge:
+                if not (ALLOW_FAL_FALLBACK and FAL_KEY):
+                    return jsonify(error=f"Google Cloud video generation is not ready: {str(ge)[:300]}")
+                provider = "fal"
 
-        # Submit to fal.ai CogVideoX
-        sizes = {
-            "16:9": {"width": 1360, "height": 768},
-            "9:16": {"width": 768, "height": 1360},
-            "1:1":  {"width": 768, "height": 768}
-        }
-        submit = requests.post(
-            "https://queue.fal.run/fal-ai/cogvideox-5b",
-            headers={"Authorization": f"Key {FAL_KEY}", "Content-Type": "application/json"},
-            json={
-                "prompt": final_prompt,
-                "num_frames": 49,
-                "guidance_scale": 7.0,
-                "num_inference_steps": 50,
-                "video_size": sizes.get(ratio, sizes["16:9"])
-            },
-            timeout=30
-        )
+        if provider == "fal":
+            if not FAL_KEY:
+                return jsonify(error="❌ FAL_KEY missing. Set VIDEO_PROVIDER=google to use Google Cloud only, or provide FAL_KEY for fal provider.")
 
-        if submit.status_code not in [200, 201]:
-            return jsonify(error=f"Submission failed: {submit.text[:300]}")
-
-        request_id = submit.json().get("request_id")
-        if not request_id:
-            return jsonify(error="No request ID returned from fal.ai.")
-
-        # Poll max 10 min
-        for _ in range(60):
-            time.sleep(10)
-            poll = requests.get(
-                f"https://queue.fal.run/fal-ai/cogvideox-5b/requests/{request_id}/status",
-                headers={"Authorization": f"Key {FAL_KEY}"},
-                timeout=15
+            sizes = {
+                "16:9": {"width": 1360, "height": 768},
+                "9:16": {"width": 768, "height": 1360},
+                "1:1":  {"width": 768, "height": 768}
+            }
+            submit = requests.post(
+                "https://queue.fal.run/fal-ai/cogvideox-5b",
+                headers={"Authorization": f"Key {FAL_KEY}", "Content-Type": "application/json"},
+                json={
+                    "prompt": final_prompt,
+                    "num_frames": 49,
+                    "guidance_scale": 7.0,
+                    "num_inference_steps": 50,
+                    "video_size": sizes.get(ratio, sizes["16:9"])
+                },
+                timeout=30
             )
-            status = poll.json().get("status")
-            if status == "COMPLETED":
-                final = requests.get(
-                    f"https://queue.fal.run/fal-ai/cogvideox-5b/requests/{request_id}",
+
+            if submit.status_code not in [200, 201]:
+                return jsonify(error=f"Submission failed: {submit.text[:300]}")
+
+            request_id = submit.json().get("request_id")
+            if not request_id:
+                return jsonify(error="No request ID returned from fal.ai.")
+
+            for _ in range(60):
+                time.sleep(10)
+                poll = requests.get(
+                    f"https://queue.fal.run/fal-ai/cogvideox-5b/requests/{request_id}/status",
                     headers={"Authorization": f"Key {FAL_KEY}"},
                     timeout=15
-                ).json()
-                video_url = final.get("video", {}).get("url")
-                if not video_url:
-                    return jsonify(error="Video URL not found in response.")
-                return jsonify(prompt_used=final_prompt, video_url=video_url, video_b64=None)
-            elif status == "FAILED":
-                return jsonify(error="Generation failed on fal.ai. Please try again.")
+                )
+                status = poll.json().get("status")
+                if status == "COMPLETED":
+                    final = requests.get(
+                        f"https://queue.fal.run/fal-ai/cogvideox-5b/requests/{request_id}",
+                        headers={"Authorization": f"Key {FAL_KEY}"},
+                        timeout=15
+                    ).json()
+                    video_url = final.get("video", {}).get("url")
+                    if not video_url:
+                        return jsonify(error="Video URL not found in response.")
+                    return jsonify(prompt_used=final_prompt, video_url=video_url, video_b64=None, provider="fal")
+                elif status == "FAILED":
+                    return jsonify(error="Generation failed on fal.ai. Please try again.")
 
-        return jsonify(error="Timed out after 10 minutes. Try a simpler prompt.")
+            return jsonify(error="Timed out after 10 minutes. Try a simpler prompt.")
+
+        return jsonify(error="Invalid VIDEO_PROVIDER. Use 'google' or 'fal'.")
 
     except requests.exceptions.Timeout:
         return jsonify(error="Request timed out. Please try again.")
-    except Exception as e:
+    except Exception:
         return jsonify(error=f"Server error: {traceback.format_exc()}")
 
 @app.route("/gen_prompt", methods=["POST"])
@@ -570,7 +648,7 @@ def gen_prompt():
         d = request.json or {}
         return jsonify(result=llm(
             "Professional educator-focused AI video prompt writer. Family-safe. Optimized for CogVideoX.",
-            f"Write an EDUCATOR-READY AI video prompt for any subject. Idea: {d.get('idea', '')}\nStyle: {d.get('style', '')} | Mood: {d.get('mood', '')} | Duration: {d.get('duration', '')}\n\nInclude: Grade Level options, Learning Objective, Classroom Activity.\n\n✨ MAIN PROMPT\n🎨 STYLE TAGS\n🎯 LEARNING OBJECTIVE\n🧩 CLASSROOM ACTIVITY\n🚫 NEGATIVE PROMPT\n💡 PRO TIP"
+            f"Write an EDUCATOR-READY AI video prompt. Idea: {d.get('idea', '')}\nStyle: {d.get('style', '')} | Mood: {d.get('mood', '')} | Duration: {d.get('duration', '')}\n\nInclude: Grade Level options, Learning Objective, Classroom Activity.\n\n✨ MAIN PROMPT\n🎨 STYLE TAGS\n🎯 LEARNING OBJECTIVE\n🧩 CLASSROOM ACTIVITY\n🚫 NEGATIVE PROMPT\n💡 PRO TIP"
         ))
     except Exception:
         return jsonify(result=f"❌ {traceback.format_exc()}")
@@ -621,7 +699,10 @@ def gen_ideas():
 
 if __name__ == "__main__":
     print("🚀 PureVid AI starting...")
-    print(f"✅ Vertex AI: {'Ready' if VERTEX_PROJECT_ID else 'Not configured'}")
+    print(f"✅ Vertex AI text: {'Ready' if VERTEX_PROJECT_ID else 'Not configured'}")
+    print(f"✅ Video provider: {VIDEO_PROVIDER}")
+    print(f"✅ Google video model: {VERTEX_VIDEO_MODEL if VIDEO_PROVIDER == 'google' else 'n/a'}")
+    print(f"✅ fal fallback enabled: {ALLOW_FAL_FALLBACK}")
     print(f"✅ Groq fallback: {'Ready' if client else '❌ Missing GROQ_KEY'}")
-    print(f"✅ CogVideoX via fal.ai: {'Ready' if FAL_KEY else '❌ Missing FAL_KEY'}")
+    print(f"✅ fal provider key: {'Ready' if FAL_KEY else 'Not configured'}")
     app.run(host="0.0.0.0", port=int(os.environ.get('PORT', 5000)), debug=False)
