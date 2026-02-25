@@ -10,6 +10,9 @@ from groq import Groq
 app = Flask(__name__)
 GROQ_KEY = os.environ.get("GROQ_KEY")
 FAL_KEY = os.environ.get("FAL_KEY")
+VERTEX_PROJECT_ID = os.environ.get("VERTEX_PROJECT_ID") or os.environ.get("GOOGLE_CLOUD_PROJECT")
+VERTEX_LOCATION = os.environ.get("VERTEX_LOCATION", "us-central1")
+VERTEX_MODEL = os.environ.get("VERTEX_MODEL", "gemini-1.5-flash")
 client = Groq(api_key=GROQ_KEY) if GROQ_KEY else None
 
 UNSAFE = ["nudity","naked","violence","blood","kill","alcohol","drugs","gambling","weapon","gore","nsfw","sexy","adult","explicit","hate","terrorist"]
@@ -70,37 +73,93 @@ def get_context():
     return _cache["content"] if _cache["content"] else FALLBACK
 
 # ── LLM ─────────────────────────────────────────────────────
-def llm(system, user):
-    if not client:
-        return "❌ GROQ_KEY missing."
-    
-    video_prompt = """
-    🎥 SAFE VIDEO CREATION ASSISTANT
-    ✅ Focus on cinematic, family-friendly video prompts for CogVideoX.
-    ✅ Keep output practical, readable, and directly usable.
-    ✅ Avoid violence, explicit, hateful, or otherwise unsafe suggestions.
-    """
+def _sanitize_text(text):
+    text = (text or "").replace('**', '')
+    return ''.join(c for c in text
+                   if (ord(c) < 128 or c in 'ğüşıöçĞÜŞİÖÇ' or
+                       0x1F600 <= ord(c) <= 0x1F64F or
+                       0x1F300 <= ord(c) <= 0x1F5FF or
+                       0x1F680 <= ord(c) <= 0x1F6FF or
+                       0x1F900 <= ord(c) <= 0x1F9FF)).strip()
 
-    full_system = system + "\n\n" + video_prompt + "\n\nReference data:\n" + get_context()
-    
+
+def _vertex_llm(full_system, user):
+    if not VERTEX_PROJECT_ID:
+        return None
+
+    try:
+        import google.auth
+        from google.auth.transport.requests import Request as GoogleAuthRequest
+    except ImportError as exc:
+        raise RuntimeError("google-auth package is required for Vertex AI mode.") from exc
+
+    creds, _ = google.auth.default(scopes=["https://www.googleapis.com/auth/cloud-platform"])
+    creds.refresh(GoogleAuthRequest())
+    endpoint = (
+        f"https://{VERTEX_LOCATION}-aiplatform.googleapis.com/v1/projects/"
+        f"{VERTEX_PROJECT_ID}/locations/{VERTEX_LOCATION}/publishers/google/models/"
+        f"{VERTEX_MODEL}:generateContent"
+    )
+    payload = {
+        "contents": [
+            {"role": "user", "parts": [{"text": f"System:\n{full_system}\n\nUser:\n{user}"}]}
+        ],
+        "generationConfig": {"temperature": 0.6, "maxOutputTokens": 2000}
+    }
+    res = requests.post(
+        endpoint,
+        headers={"Authorization": f"Bearer {creds.token}", "Content-Type": "application/json"},
+        json=payload,
+        timeout=40,
+    )
+    if res.status_code != 200:
+        raise RuntimeError(f"Vertex AI error: {res.text[:400]}")
+
+    data = res.json()
+    candidates = data.get("candidates", [])
+    if not candidates:
+        raise RuntimeError("Vertex AI returned no candidates.")
+    parts = candidates[0].get("content", {}).get("parts", [])
+    text = "\n".join(part.get("text", "") for part in parts if part.get("text"))
+    return _sanitize_text(text)
+
+
+def _groq_llm(full_system, user):
+    if not client:
+        return None
+
     r = client.chat.completions.create(
         model="llama-3.3-70b-versatile",
-        messages=[{"role":"system","content":full_system},{"role":"user","content":user}],
-        max_tokens=2000, temperature=0.6
+        messages=[{"role": "system", "content": full_system}, {"role": "user", "content": user}],
+        max_tokens=2000,
+        temperature=0.6,
     )
-    
-    text = r.choices[0].message.content
-    text = text.replace('**', '')  # Remove bold markdown
-    
-    # Keep emojis + Turkish/English characters
-    text = ''.join(c for c in text 
-                   if (ord(c) < 128 or c in 'ğüşıöçĞÜŞİÖÇ' or
-                       0x1F600 <= ord(c) <= 0x1F64F or  # Emoticons
-                       0x1F300 <= ord(c) <= 0x1F5FF or  # Symbols
-                       0x1F680 <= ord(c) <= 0x1F6FF or  # Transport
-                       0x1F900 <= ord(c) <= 0x1F9FF))   # People
-    
-    return text.strip()
+    return _sanitize_text(r.choices[0].message.content)
+
+
+def llm(system, user):
+    educator_prompt = """
+    🎓 EDUCATOR-FIRST CREATIVE ASSISTANT
+    ✅ Produce clear outputs teachers can use quickly for any subject.
+    ✅ Include grade-level options, activity ideas, and assessment-friendly suggestions.
+    ✅ Keep tone practical, classroom-safe, and globally usable.
+    ✅ Avoid violence, explicit, hateful, or unsafe content.
+    """
+
+    full_system = system + "\n\n" + educator_prompt + "\n\nReference data:\n" + get_context()
+
+    if VERTEX_PROJECT_ID:
+        try:
+            return _vertex_llm(full_system, user)
+        except Exception:
+            if client:
+                return _groq_llm(full_system, user)
+            return f"❌ Vertex AI failed:\n{traceback.format_exc()}"
+
+    if client:
+        return _groq_llm(full_system, user)
+
+    return "❌ Missing AI config. Set VERTEX_PROJECT_ID (recommended for Google Cloud credits) or GROQ_KEY."
 
 # ── HTML ─────────────────────────────────────────────────────
 HTML = """<!DOCTYPE html>
@@ -108,7 +167,7 @@ HTML = """<!DOCTYPE html>
 <head>
 <title>🎥 PureVid AI</title>
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<meta name="description" content="Safe AI video generator for everyone. Family-friendly and powered by CogVideoX.">
+<meta name="description" content="Educator-ready AI video and lesson idea generator. Family-safe and classroom-friendly.">
 <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
 <style>
 :root{--bd:#1a2e4a;--bm:#2563eb;--bl:#60a5fa;--pale:#f0f4ff;--border:#bfdbfe;--w:#fff;--gray:#666;--r:12px}
@@ -164,11 +223,11 @@ hr{border:none;border-top:1px solid #e8eaf0;margin:18px 0}
 <body>
 <div class="header">
   <h1>🎥 PureVid AI</h1>
-  <p><b>Safe AI video generator for everyone</b></p>
+  <p><b>Educator-ready AI videos and teaching content for any subject</b></p>
   <div class="badges">
-    <span class="badge">✅ Family Safe</span>
+    <span class="badge">✅ Classroom Safe</span>
     <span class="badge">🔒 No Data Stored</span>
-    <span class="badge">🎬 Real Video Generation</span>
+    <span class="badge">🎓 Educator Friendly</span>
     <span class="badge">⚡ Powered by CogVideoX</span>
   </div>
 </div>
@@ -185,12 +244,12 @@ hr{border:none;border-top:1px solid #e8eaf0;margin:18px 0}
 
   <!-- GENERATE -->
   <div id="generate" class="tab active"><div class="card">
-    <h2>🎬 Generate a Video</h2>
-    <p class="hint">Describe what you want → PureVid AI generates a real video using CogVideoX. Always family-safe. Takes 2–4 minutes.</p>
+    <h2>🎬 Generate a Teaching Video</h2>
+    <p class="hint">Describe your lesson moment (topic, grade, activity). PureVid AI creates a family-safe educational video with CogVideoX. Takes 2–4 minutes.</p>
     <hr>
     <div class="field">
       <label>What do you want in your video?</label>
-      <textarea id="vp" rows="4" placeholder="e.g. Children playing in a sunny park, golden light, slow motion, cinematic..."></textarea>
+      <textarea id="vp" rows="4" placeholder="e.g. Grade 5 science class exploring the water cycle with simple animations, bright classroom lighting, cinematic..."></textarea>
     </div>
     <div class="field">
       <label>Aspect Ratio</label>
@@ -316,7 +375,7 @@ hr{border:none;border-top:1px solid #e8eaf0;margin:18px 0}
 </div>
 
 <div class="footer">
-  🎥 <strong>PureVid AI</strong> | Safe AI video generator <br>
+  🎥 <strong>PureVid AI</strong> | Educator-ready AI video + lesson support <br>
   🔒 No data stored | ✅ Family safe always<br>
   <span style="font-size:.8em;color:#94a3b8">
     ⚠️ AI-generated content may contain errors or unexpected results. This tool is provided
@@ -436,9 +495,9 @@ def generate_video():
         if not is_safe(raw_prompt):
             return jsonify(error="🚫 Unsafe content detected. Please use family-friendly descriptions.")
 
-        # Enhance with Groq
+        # Enhance with AI (Vertex AI preferred, Groq fallback)
         final_prompt = raw_prompt
-        if client:
+        if client or VERTEX_PROJECT_ID:
             try:
                 final_prompt = llm(
                     "Expert prompt enhancer for safe AI video generation. CogVideoX works best with detailed cinematic scene descriptions.",
@@ -510,8 +569,8 @@ def gen_prompt():
     try:
         d = request.json or {}
         return jsonify(result=llm(
-            "Professional AI video prompt writer. Always family-safe. Optimized for CogVideoX.",
-            f"Write AI video prompt for: {d.get('idea', '')}\nStyle: {d.get('style', '')} | Mood: {d.get('mood', '')} | Duration: {d.get('duration', '')}\n\n✨ MAIN PROMPT\n🎨 STYLE TAGS\n🚫 NEGATIVE PROMPT\n💡 PRO TIP"
+            "Professional educator-focused AI video prompt writer. Family-safe. Optimized for CogVideoX.",
+            f"Write an EDUCATOR-READY AI video prompt for any subject. Idea: {d.get('idea', '')}\nStyle: {d.get('style', '')} | Mood: {d.get('mood', '')} | Duration: {d.get('duration', '')}\n\nInclude: Grade Level options, Learning Objective, Classroom Activity.\n\n✨ MAIN PROMPT\n🎨 STYLE TAGS\n🎯 LEARNING OBJECTIVE\n🧩 CLASSROOM ACTIVITY\n🚫 NEGATIVE PROMPT\n💡 PRO TIP"
         ))
     except Exception:
         return jsonify(result=f"❌ {traceback.format_exc()}")
@@ -554,14 +613,15 @@ def gen_ideas():
     try:
         d = request.json or {}
         return jsonify(result=llm(
-            "Creative content strategist for family-safe AI video.",
-            f"10 safe video ideas:\nTheme: {d.get('theme', '')} | Platform: {d.get('platform', '')} | Audience: {d.get('audience', '')}\n\nFor each:\n💡 IDEA [N]\n📝 Concept\n✨ AI Prompt\n📈 Why it works"
+            "Creative education content strategist for family-safe AI video.",
+            f"10 educator-safe video ideas:\nTheme: {d.get('theme', '')} | Platform: {d.get('platform', '')} | Audience: {d.get('audience', '')}\n\nFor each:\n💡 IDEA [N]\n📝 Concept\n🎯 Learning Goal\n✨ AI Prompt\n📈 Why it works in class"
         ))
     except Exception:
         return jsonify(result=f"❌ {traceback.format_exc()}")
 
 if __name__ == "__main__":
     print("🚀 PureVid AI starting...")
-    print(f"✅ Groq: {'Ready' if client else '❌ Missing GROQ_KEY'}")
+    print(f"✅ Vertex AI: {'Ready' if VERTEX_PROJECT_ID else 'Not configured'}")
+    print(f"✅ Groq fallback: {'Ready' if client else '❌ Missing GROQ_KEY'}")
     print(f"✅ CogVideoX via fal.ai: {'Ready' if FAL_KEY else '❌ Missing FAL_KEY'}")
     app.run(host="0.0.0.0", port=int(os.environ.get('PORT', 5000)), debug=False)
