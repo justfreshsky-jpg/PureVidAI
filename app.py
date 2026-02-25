@@ -1,5 +1,6 @@
 import os
 os.environ['HTTPX_PROXIES'] = 'null'  # Fix Render/httpx proxies bug
+import re
 import traceback, time, threading
 import requests
 from bs4 import BeautifulSoup
@@ -12,9 +13,10 @@ FAL_KEY = os.environ.get("FAL_KEY")
 client = Groq(api_key=GROQ_KEY) if GROQ_KEY else None
 
 UNSAFE = ["nudity","naked","violence","blood","kill","alcohol","drugs","gambling","weapon","gore","nsfw","sexy","adult","explicit","hate","terrorist"]
+UNSAFE_PATTERN = re.compile(r"\b(?:" + "|".join(re.escape(w) for w in UNSAFE) + r")\b", re.IGNORECASE)
 
 def is_safe(prompt):
-    return not any(w in prompt.lower() for w in UNSAFE)
+    return not bool(UNSAFE_PATTERN.search(prompt or ""))
 
 # ── BACKGROUND SCRAPER ──────────────────────────────────────
 _cache = {"content": "", "last": 0}
@@ -72,17 +74,14 @@ def llm(system, user):
     if not client:
         return "❌ GROQ_KEY missing."
     
-    # USA immigrant guide instruction with emojis
-    usa_prompt = """
-    🇺🇸 USA IMMIGRANT GUIDE ONLY
-    ✅ VISA / SSN / BANK / HOUSING / UBER / TAX / HEALTH
-    • Emojis: ✅ 🚀 💰 📱 🏠 🪪 ✈️ 🏥 💳 
-    • IMPORTANT words in UPPERCASE
-    • Short paragraphs, long lists
-    ⚠️ USA / NJ / NY ONLY!
+    video_prompt = """
+    🎥 SAFE VIDEO CREATION ASSISTANT
+    ✅ Focus on cinematic, family-friendly video prompts for CogVideoX.
+    ✅ Keep output practical, readable, and directly usable.
+    ✅ Avoid violence, explicit, hateful, or otherwise unsafe suggestions.
     """
-    
-    full_system = system + "\n\n" + usa_prompt + "\n\nBlog data:\n" + get_context()
+
+    full_system = system + "\n\n" + video_prompt + "\n\nReference data:\n" + get_context()
     
     r = client.chat.completions.create(
         model="llama-3.3-70b-versatile",
@@ -509,10 +508,10 @@ def generate_video():
 @app.route("/gen_prompt", methods=["POST"])
 def gen_prompt():
     try:
-        d = request.json
+        d = request.json or {}
         return jsonify(result=llm(
             "Professional AI video prompt writer. Always family-safe. Optimized for CogVideoX.",
-            f"Write AI video prompt for: {d['idea']}\nStyle: {d['style']} | Mood: {d['mood']} | Duration: {d['duration']}\n\n✨ MAIN PROMPT\n🎨 STYLE TAGS\n🚫 NEGATIVE PROMPT\n💡 PRO TIP"
+            f"Write AI video prompt for: {d.get('idea', '')}\nStyle: {d.get('style', '')} | Mood: {d.get('mood', '')} | Duration: {d.get('duration', '')}\n\n✨ MAIN PROMPT\n🎨 STYLE TAGS\n🚫 NEGATIVE PROMPT\n💡 PRO TIP"
         ))
     except Exception:
         return jsonify(result=f"❌ {traceback.format_exc()}")
@@ -520,10 +519,10 @@ def gen_prompt():
 @app.route("/story_to_video", methods=["POST"])
 def story_to_video():
     try:
-        d = request.json
+        d = request.json or {}
         return jsonify(result=llm(
             "Professional video director. Family-safe scene prompts only. Optimized for CogVideoX.",
-            f"Break into {d['scenes']} scenes. Style: {d['style']}\nStory: {d['story']}\n\nFor each:\n🎬 SCENE [N]\n📍 Setting\n✨ AI PROMPT\n🎵 Mood"
+            f"Break into {d.get('scenes', '')} scenes. Style: {d.get('style', '')}\nStory: {d.get('story', '')}\n\nFor each:\n🎬 SCENE [N]\n📍 Setting\n✨ AI PROMPT\n🎵 Mood"
         ))
     except Exception:
         return jsonify(result=f"❌ {traceback.format_exc()}")
@@ -531,10 +530,10 @@ def story_to_video():
 @app.route("/safety_check", methods=["POST"])
 def safety_check():
     try:
-        d = request.json
+        d = request.json or {}
         return jsonify(result=llm(
             "Content safety expert for AI video generation.",
-            f"Audience: {d['audience']}\nPrompt: {d['prompt']}\n\n🛡️ RATING (Safe/Caution/Unsafe)\n✅ SAFE ELEMENTS\n⚠️ CONCERNS\n🔧 SAFE ALTERNATIVE"
+            f"Audience: {d.get('audience', '')}\nPrompt: {d.get('prompt', '')}\n\n🛡️ RATING (Safe/Caution/Unsafe)\n✅ SAFE ELEMENTS\n⚠️ CONCERNS\n🔧 SAFE ALTERNATIVE"
         ))
     except Exception:
         return jsonify(result=f"❌ {traceback.format_exc()}")
@@ -542,10 +541,10 @@ def safety_check():
 @app.route("/enhance_prompt", methods=["POST"])
 def enhance_prompt():
     try:
-        d = request.json
+        d = request.json or {}
         return jsonify(result=llm(
             "Master AI prompt engineer for cinematic safe video. Optimized for CogVideoX-5b.",
-            f"Enhance: {d['prompt']}\nCamera: {d['camera']} | Lighting: {d['lighting']}\n\n✨ ENHANCED PROMPT\n📸 TECHNICAL DETAILS\n🎨 COLORS & MOOD\n🚫 NEGATIVE PROMPT"
+            f"Enhance: {d.get('prompt', '')}\nCamera: {d.get('camera', '')} | Lighting: {d.get('lighting', '')}\n\n✨ ENHANCED PROMPT\n📸 TECHNICAL DETAILS\n🎨 COLORS & MOOD\n🚫 NEGATIVE PROMPT"
         ))
     except Exception:
         return jsonify(result=f"❌ {traceback.format_exc()}")
@@ -553,10 +552,10 @@ def enhance_prompt():
 @app.route("/gen_ideas", methods=["POST"])
 def gen_ideas():
     try:
-        d = request.json
+        d = request.json or {}
         return jsonify(result=llm(
             "Creative content strategist for family-safe AI video.",
-            f"10 safe video ideas:\nTheme: {d['theme']} | Platform: {d['platform']} | Audience: {d['audience']}\n\nFor each:\n💡 IDEA [N]\n📝 Concept\n✨ AI Prompt\n📈 Why it works"
+            f"10 safe video ideas:\nTheme: {d.get('theme', '')} | Platform: {d.get('platform', '')} | Audience: {d.get('audience', '')}\n\nFor each:\n💡 IDEA [N]\n📝 Concept\n✨ AI Prompt\n📈 Why it works"
         ))
     except Exception:
         return jsonify(result=f"❌ {traceback.format_exc()}")
