@@ -1,5 +1,6 @@
 import os
 os.environ['HTTPX_PROXIES'] = 'null'  # Fix Render/httpx proxies bug
+import re
 import traceback, time, threading
 import requests
 from bs4 import BeautifulSoup
@@ -9,12 +10,24 @@ from groq import Groq
 app = Flask(__name__)
 GROQ_KEY = os.environ.get("GROQ_KEY")
 FAL_KEY = os.environ.get("FAL_KEY")
+VERTEX_PROJECT_ID = (
+    os.environ.get("VERTEX_PROJECT_ID")
+    or os.environ.get("GOOGLE_CLOUD_PROJECT")
+    or os.environ.get("GCP_PROJECT")
+    or os.environ.get("GCLOUD_PROJECT")
+)
+VERTEX_LOCATION = os.environ.get("VERTEX_LOCATION", "us-central1")
+VERTEX_MODEL = os.environ.get("VERTEX_MODEL", "gemini-1.5-flash")
+VIDEO_PROVIDER = os.environ.get("VIDEO_PROVIDER", "google").lower()  # google|fal
+VERTEX_VIDEO_MODEL = os.environ.get("VERTEX_VIDEO_MODEL", "veo-2.0-generate-001")
+ALLOW_FAL_FALLBACK = os.environ.get("ALLOW_FAL_FALLBACK", "false").lower() == "true"
 client = Groq(api_key=GROQ_KEY) if GROQ_KEY else None
 
 UNSAFE = ["nudity","naked","violence","blood","kill","alcohol","drugs","gambling","weapon","gore","nsfw","sexy","adult","explicit","hate","terrorist"]
+UNSAFE_PATTERN = re.compile(r"\b(?:" + "|".join(re.escape(w) for w in UNSAFE) + r")\b", re.IGNORECASE)
 
 def is_safe(prompt):
-    return not any(w in prompt.lower() for w in UNSAFE)
+    return not bool(UNSAFE_PATTERN.search(prompt or ""))
 
 # ── BACKGROUND SCRAPER ──────────────────────────────────────
 _cache = {"content": "", "last": 0}
@@ -68,40 +81,84 @@ def get_context():
     return _cache["content"] if _cache["content"] else FALLBACK
 
 # ── LLM ─────────────────────────────────────────────────────
-def llm(system, user):
+def _sanitize_text(text):
+    text = (text or "").replace('**', '')
+    return ''.join(c for c in text
+                   if (ord(c) < 128 or c in 'ğüşıöçĞÜŞİÖÇ' or
+                       0x1F600 <= ord(c) <= 0x1F64F or
+                       0x1F300 <= ord(c) <= 0x1F5FF or
+                       0x1F680 <= ord(c) <= 0x1F6FF or
+                       0x1F900 <= ord(c) <= 0x1F9FF)).strip()
+
+
+def _vertex_llm(full_system, user):
+    token, project_id = _get_google_auth_context()
+    if not project_id:
+        raise RuntimeError("Google Cloud project is not configured. Set VERTEX_PROJECT_ID or GOOGLE_CLOUD_PROJECT.")
+
+    endpoint = (
+        f"https://{VERTEX_LOCATION}-aiplatform.googleapis.com/v1/projects/"
+        f"{project_id}/locations/{VERTEX_LOCATION}/publishers/google/models/"
+        f"{VERTEX_MODEL}:generateContent"
+    )
+    payload = {
+        "contents": [
+            {"role": "user", "parts": [{"text": f"System:\n{full_system}\n\nUser:\n{user}"}]}
+        ],
+        "generationConfig": {"temperature": 0.6, "maxOutputTokens": 2000}
+    }
+    res = requests.post(
+        endpoint,
+        headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json"},
+        json=payload,
+        timeout=40,
+    )
+    if res.status_code != 200:
+        raise RuntimeError(f"Vertex AI error: {res.text[:400]}")
+
+    data = res.json()
+    candidates = data.get("candidates", [])
+    if not candidates:
+        raise RuntimeError("Vertex AI returned no candidates.")
+    parts = candidates[0].get("content", {}).get("parts", [])
+    text = "\n".join(part.get("text", "") for part in parts if part.get("text"))
+    return _sanitize_text(text)
+
+
+def _groq_llm(full_system, user):
     if not client:
-        return "❌ GROQ_KEY missing."
-    
-    # USA immigrant guide instruction with emojis
-    usa_prompt = """
-    🇺🇸 USA IMMIGRANT GUIDE ONLY
-    ✅ VISA / SSN / BANK / HOUSING / UBER / TAX / HEALTH
-    • Emojis: ✅ 🚀 💰 📱 🏠 🪪 ✈️ 🏥 💳 
-    • IMPORTANT words in UPPERCASE
-    • Short paragraphs, long lists
-    ⚠️ USA / NJ / NY ONLY!
-    """
-    
-    full_system = system + "\n\n" + usa_prompt + "\n\nBlog data:\n" + get_context()
-    
+        return None
+
     r = client.chat.completions.create(
         model="llama-3.3-70b-versatile",
-        messages=[{"role":"system","content":full_system},{"role":"user","content":user}],
-        max_tokens=2000, temperature=0.6
+        messages=[{"role": "system", "content": full_system}, {"role": "user", "content": user}],
+        max_tokens=2000,
+        temperature=0.6,
     )
-    
-    text = r.choices[0].message.content
-    text = text.replace('**', '')  # Remove bold markdown
-    
-    # Keep emojis + Turkish/English characters
-    text = ''.join(c for c in text 
-                   if (ord(c) < 128 or c in 'ğüşıöçĞÜŞİÖÇ' or
-                       0x1F600 <= ord(c) <= 0x1F64F or  # Emoticons
-                       0x1F300 <= ord(c) <= 0x1F5FF or  # Symbols
-                       0x1F680 <= ord(c) <= 0x1F6FF or  # Transport
-                       0x1F900 <= ord(c) <= 0x1F9FF))   # People
-    
-    return text.strip()
+    return _sanitize_text(r.choices[0].message.content)
+
+
+def llm(system, user):
+    educator_prompt = """
+    🎓 EDUCATOR-FIRST CREATIVE ASSISTANT
+    ✅ Produce clear outputs teachers can use quickly in real classrooms.
+    ✅ Include grade-level options, activity ideas, and assessment-friendly suggestions.
+    ✅ Keep tone practical, classroom-safe, and globally usable.
+    ✅ Avoid violence, explicit, hateful, or unsafe content.
+    """
+
+    full_system = system + "\n\n" + educator_prompt + "\n\nReference data:\n" + get_context()
+
+    try:
+        return _vertex_llm(full_system, user)
+    except Exception:
+        if client:
+            return _groq_llm(full_system, user)
+
+    if client:
+        return _groq_llm(full_system, user)
+
+    return "❌ Missing AI config. Configure Google Cloud ADC (or set VERTEX_PROJECT_ID) or provide GROQ_KEY."
 
 # ── HTML ─────────────────────────────────────────────────────
 HTML = """<!DOCTYPE html>
@@ -109,7 +166,7 @@ HTML = """<!DOCTYPE html>
 <head>
 <title>🎥 PureVid AI</title>
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<meta name="description" content="Safe AI video generator for everyone. Family-friendly and powered by CogVideoX.">
+<meta name="description" content="Educator-ready AI video and lesson idea generator. Family-safe and classroom-friendly.">
 <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
 <style>
 :root{--bd:#1a2e4a;--bm:#2563eb;--bl:#60a5fa;--pale:#f0f4ff;--border:#bfdbfe;--w:#fff;--gray:#666;--r:12px}
@@ -160,21 +217,43 @@ textarea{resize:vertical;min-height:90px}
 hr{border:none;border-top:1px solid #e8eaf0;margin:18px 0}
 .tip-box{background:#eff6ff;border-left:3px solid var(--bl);padding:12px 14px;border-radius:0 10px 10px 0;font-size:13px;color:#1e40af;margin-top:12px}
 .footer{text-align:center;padding:28px 16px;color:var(--gray);font-size:13px;line-height:2;background:var(--w);border-radius:16px;margin-top:20px}
+.topnav{display:flex;justify-content:center;gap:10px;flex-wrap:wrap;margin:14px 0 4px}
+.topnav a{color:#fff;text-decoration:none;font-weight:700;font-size:12px;padding:6px 10px;border:1px solid rgba(255,255,255,.35);border-radius:999px;background:rgba(255,255,255,.12)}
+.topnav a:hover{background:rgba(255,255,255,.22)}
+.quickstart{background:#ffffffd9;border:1px solid #dbeafe;border-radius:14px;padding:14px;margin:0 auto 18px;max-width:960px}
+.quickstart h3{color:var(--bd);font-size:16px;margin-bottom:8px}
+.step-list{display:grid;grid-template-columns:1fr;gap:8px;font-size:13px;color:#334155}
+@media(min-width:800px){.step-list{grid-template-columns:repeat(3,1fr)}}
+.step{background:#f8fbff;border:1px solid #dbeafe;border-radius:10px;padding:10px}
+.examples{display:flex;gap:8px;flex-wrap:wrap;margin-top:10px}
+.ex{border:1px solid var(--border);background:#fff;color:#1d4ed8;border-radius:999px;padding:6px 10px;font-size:12px;cursor:pointer}
+.ex:hover{background:#eff6ff}
 </style>
 </head>
 <body>
 <div class="header">
   <h1>🎥 PureVid AI</h1>
-  <p><b>Safe AI video generator for everyone</b></p>
+  <p><b>Beautiful, classroom-ready AI videos and teaching content for educators</b></p>
+  <div class="topnav">
+    <a href="#generate">Start</a><a href="#prompt">Prompts</a><a href="#safety">Safety</a><a href="#ideas">Ideas</a>
+  </div>
   <div class="badges">
-    <span class="badge">✅ Family Safe</span>
+    <span class="badge">✅ Classroom Safe</span>
     <span class="badge">🔒 No Data Stored</span>
-    <span class="badge">🎬 Real Video Generation</span>
+    <span class="badge">🎓 Educator Friendly</span>
     <span class="badge">⚡ Powered by CogVideoX</span>
   </div>
 </div>
 
 <div class="container">
+  <div class="quickstart">
+    <h3>✨ Quick start for busy teachers</h3>
+    <div class="step-list">
+      <div class="step"><b>1) Describe your lesson moment</b><br/>Topic, grade level, and classroom activity.</div>
+      <div class="step"><b>2) Generate and review</b><br/>Wait for the video, then check safety and clarity.</div>
+      <div class="step"><b>3) Download and use</b><br/>Use in class, LMS, or social channels.</div>
+    </div>
+  </div>
   <div class="tabs">
     <button class="active" onclick="show('generate',this)"><span class="tab-icon">🎬</span>Generate</button>
     <button onclick="show('prompt',this)"><span class="tab-icon">✨</span>Prompts</button>
@@ -186,12 +265,17 @@ hr{border:none;border-top:1px solid #e8eaf0;margin:18px 0}
 
   <!-- GENERATE -->
   <div id="generate" class="tab active"><div class="card">
-    <h2>🎬 Generate a Video</h2>
-    <p class="hint">Describe what you want → PureVid AI generates a real video using CogVideoX. Always family-safe. Takes 2–4 minutes.</p>
+    <h2>🎬 Generate a Teaching Video</h2>
+    <p class="hint">Describe your lesson moment (topic, grade, activity). PureVid AI creates a family-safe educational video with CogVideoX. Takes 2–4 minutes.</p>
     <hr>
     <div class="field">
       <label>What do you want in your video?</label>
-      <textarea id="vp" rows="4" placeholder="e.g. Children playing in a sunny park, golden light, slow motion, cinematic..."></textarea>
+      <textarea id="vp" rows="4" placeholder="e.g. Grade 5 science class exploring the water cycle with simple animations, bright classroom lighting, cinematic..."></textarea>
+      <div class="examples">
+        <button class="ex" type="button" onclick="setExample('Grade 4 math lesson on fractions with colorful blocks, friendly classroom, clean visuals')">Math Example</button>
+        <button class="ex" type="button" onclick="setExample('Middle school history scene showing ancient Egypt timeline, museum style, cinematic')">History Example</button>
+        <button class="ex" type="button" onclick="setExample('Kindergarten phonics lesson with playful letter animations, warm classroom, joyful mood')">ELA Example</button>
+      </div>
     </div>
     <div class="field">
       <label>Aspect Ratio</label>
@@ -204,13 +288,13 @@ hr{border:none;border-top:1px solid #e8eaf0;margin:18px 0}
     <div class="tip-box">💡 Add words like <b>cinematic, golden light, slow motion, peaceful, nature</b> for better results. Unsafe words are auto-blocked.</div>
     <button class="btn green" id="vbtn" onclick="generateVideo()">🎬 Generate Video</button>
     <div class="progress" id="prog"><div class="progress-bar" id="progbar"></div></div>
-    <div id="vstatus" style="text-align:center;color:var(--gray);font-size:13px;margin-top:8px"></div>
+    <div id="vstatus" aria-live="polite" style="text-align:center;color:var(--gray);font-size:13px;margin-top:8px"></div>
     <div class="video-box" id="vbox">
       <video id="vplayer" controls autoplay loop></video><br>
       <a id="vdownload" class="download-btn" download="purevid.mp4">⬇️ Download Video</a>
     </div>
     <div class="output-wrap" style="margin-top:10px">
-      <div id="vo" class="output" style="min-height:30px"></div>
+      <div id="vo" class="output" aria-live="polite" style="min-height:30px"></div>
     </div>
   </div></div>
 
@@ -317,7 +401,7 @@ hr{border:none;border-top:1px solid #e8eaf0;margin:18px 0}
 </div>
 
 <div class="footer">
-  🎥 <strong>PureVid AI</strong> | Safe AI video generator <br>
+  🎥 <strong>PureVid AI</strong> | Educator-ready AI video + lesson support <br>
   🔒 No data stored | ✅ Family safe always<br>
   <span style="font-size:.8em;color:#94a3b8">
     ⚠️ AI-generated content may contain errors or unexpected results. This tool is provided
@@ -328,6 +412,7 @@ hr{border:none;border-top:1px solid #e8eaf0;margin:18px 0}
 
 <script>
 function g(id){return document.getElementById(id).value;}
+function setExample(text){document.getElementById('vp').value=text;document.getElementById('vp').focus();}
 function show(tab,btn){
   document.querySelectorAll('.tab').forEach(t=>t.classList.remove('active'));
   document.querySelectorAll('.tabs button').forEach(b=>b.classList.remove('active'));
@@ -420,6 +505,72 @@ async function generateVideo(){
 </body>
 </html>"""
 
+def _get_google_auth_context():
+    try:
+        import google.auth
+        from google.auth.transport.requests import Request as GoogleAuthRequest
+    except ImportError as exc:
+        raise RuntimeError("google-auth package is required for Google Cloud mode.") from exc
+
+    creds, adc_project = google.auth.default(scopes=["https://www.googleapis.com/auth/cloud-platform"])
+    creds.refresh(GoogleAuthRequest())
+    project_id = VERTEX_PROJECT_ID or adc_project
+    return creds.token, project_id
+
+
+def _vertex_generate_video(prompt, ratio):
+    token, project_id = _get_google_auth_context()
+    if not project_id:
+        raise RuntimeError("Google Cloud project is not configured. Set VERTEX_PROJECT_ID or GOOGLE_CLOUD_PROJECT.")
+
+    ratio_map = {"16:9": "16:9", "9:16": "9:16", "1:1": "1:1"}
+    endpoint = (
+        f"https://{VERTEX_LOCATION}-aiplatform.googleapis.com/v1/projects/"
+        f"{project_id}/locations/{VERTEX_LOCATION}/publishers/google/models/"
+        f"{VERTEX_VIDEO_MODEL}:predictLongRunning"
+    )
+    payload = {
+        "instances": [{
+            "prompt": prompt,
+            "aspectRatio": ratio_map.get(ratio, "16:9")
+        }]
+    }
+    submit = requests.post(
+        endpoint,
+        headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json"},
+        json=payload,
+        timeout=40,
+    )
+    if submit.status_code not in (200, 201):
+        raise RuntimeError(f"Google video submission failed: {submit.text[:400]}")
+
+    operation_name = submit.json().get("name")
+    if not operation_name:
+        raise RuntimeError("Google video operation name was not returned.")
+
+    for _ in range(60):
+        time.sleep(10)
+        poll = requests.get(
+            f"https://{VERTEX_LOCATION}-aiplatform.googleapis.com/v1/{operation_name}",
+            headers={"Authorization": f"Bearer {token}"},
+            timeout=20,
+        )
+        if poll.status_code != 200:
+            continue
+        data = poll.json()
+        if data.get("done"):
+            if data.get("error"):
+                raise RuntimeError(f"Google video generation failed: {data['error']}")
+            response = data.get("response", {})
+            for pred in response.get("predictions", []):
+                uri = pred.get("video", {}).get("uri") or pred.get("videoUri")
+                if uri:
+                    return uri
+            raise RuntimeError("Google video generation completed but no video URI was returned.")
+
+    raise RuntimeError("Google video generation timed out.")
+
+
 # ── ROUTES ───────────────────────────────────────────────────
 @app.route("/")
 def index():
@@ -428,7 +579,7 @@ def index():
 @app.route("/generate_video", methods=["POST"])
 def generate_video():
     try:
-        d = request.json
+        d = request.json or {}
         raw_prompt = d.get("prompt", "").strip()
         ratio = d.get("ratio", "16:9")
 
@@ -437,9 +588,8 @@ def generate_video():
         if not is_safe(raw_prompt):
             return jsonify(error="🚫 Unsafe content detected. Please use family-friendly descriptions.")
 
-        # Enhance with Groq
         final_prompt = raw_prompt
-        if client:
+        if client or VIDEO_PROVIDER == "google":
             try:
                 final_prompt = llm(
                     "Expert prompt enhancer for safe AI video generation. CogVideoX works best with detailed cinematic scene descriptions.",
@@ -448,71 +598,82 @@ def generate_video():
             except Exception:
                 final_prompt = raw_prompt
 
-        if not FAL_KEY:
-            return jsonify(error="❌ FAL_KEY missing. Get free credits at fal.ai and add to Render > Environment Variables.")
+        provider = VIDEO_PROVIDER
+        if provider == "google":
+            try:
+                video_url = _vertex_generate_video(final_prompt, ratio)
+                return jsonify(prompt_used=final_prompt, video_url=video_url, video_b64=None, provider="google")
+            except Exception as ge:
+                if not (ALLOW_FAL_FALLBACK and FAL_KEY):
+                    return jsonify(error=f"Google Cloud video generation is not ready: {str(ge)[:300]}")
+                provider = "fal"
 
-        # Submit to fal.ai CogVideoX
-        sizes = {
-            "16:9": {"width": 1360, "height": 768},
-            "9:16": {"width": 768, "height": 1360},
-            "1:1":  {"width": 768, "height": 768}
-        }
-        submit = requests.post(
-            "https://queue.fal.run/fal-ai/cogvideox-5b",
-            headers={"Authorization": f"Key {FAL_KEY}", "Content-Type": "application/json"},
-            json={
-                "prompt": final_prompt,
-                "num_frames": 49,
-                "guidance_scale": 7.0,
-                "num_inference_steps": 50,
-                "video_size": sizes.get(ratio, sizes["16:9"])
-            },
-            timeout=30
-        )
+        if provider == "fal":
+            if not FAL_KEY:
+                return jsonify(error="❌ FAL_KEY missing. Set VIDEO_PROVIDER=google to use Google Cloud only, or provide FAL_KEY for fal provider.")
 
-        if submit.status_code not in [200, 201]:
-            return jsonify(error=f"Submission failed: {submit.text[:300]}")
-
-        request_id = submit.json().get("request_id")
-        if not request_id:
-            return jsonify(error="No request ID returned from fal.ai.")
-
-        # Poll max 10 min
-        for _ in range(60):
-            time.sleep(10)
-            poll = requests.get(
-                f"https://queue.fal.run/fal-ai/cogvideox-5b/requests/{request_id}/status",
-                headers={"Authorization": f"Key {FAL_KEY}"},
-                timeout=15
+            sizes = {
+                "16:9": {"width": 1360, "height": 768},
+                "9:16": {"width": 768, "height": 1360},
+                "1:1":  {"width": 768, "height": 768}
+            }
+            submit = requests.post(
+                "https://queue.fal.run/fal-ai/cogvideox-5b",
+                headers={"Authorization": f"Key {FAL_KEY}", "Content-Type": "application/json"},
+                json={
+                    "prompt": final_prompt,
+                    "num_frames": 49,
+                    "guidance_scale": 7.0,
+                    "num_inference_steps": 50,
+                    "video_size": sizes.get(ratio, sizes["16:9"])
+                },
+                timeout=30
             )
-            status = poll.json().get("status")
-            if status == "COMPLETED":
-                final = requests.get(
-                    f"https://queue.fal.run/fal-ai/cogvideox-5b/requests/{request_id}",
+
+            if submit.status_code not in [200, 201]:
+                return jsonify(error=f"Submission failed: {submit.text[:300]}")
+
+            request_id = submit.json().get("request_id")
+            if not request_id:
+                return jsonify(error="No request ID returned from fal.ai.")
+
+            for _ in range(60):
+                time.sleep(10)
+                poll = requests.get(
+                    f"https://queue.fal.run/fal-ai/cogvideox-5b/requests/{request_id}/status",
                     headers={"Authorization": f"Key {FAL_KEY}"},
                     timeout=15
-                ).json()
-                video_url = final.get("video", {}).get("url")
-                if not video_url:
-                    return jsonify(error="Video URL not found in response.")
-                return jsonify(prompt_used=final_prompt, video_url=video_url, video_b64=None)
-            elif status == "FAILED":
-                return jsonify(error="Generation failed on fal.ai. Please try again.")
+                )
+                status = poll.json().get("status")
+                if status == "COMPLETED":
+                    final = requests.get(
+                        f"https://queue.fal.run/fal-ai/cogvideox-5b/requests/{request_id}",
+                        headers={"Authorization": f"Key {FAL_KEY}"},
+                        timeout=15
+                    ).json()
+                    video_url = final.get("video", {}).get("url")
+                    if not video_url:
+                        return jsonify(error="Video URL not found in response.")
+                    return jsonify(prompt_used=final_prompt, video_url=video_url, video_b64=None, provider="fal")
+                elif status == "FAILED":
+                    return jsonify(error="Generation failed on fal.ai. Please try again.")
 
-        return jsonify(error="Timed out after 10 minutes. Try a simpler prompt.")
+            return jsonify(error="Timed out after 10 minutes. Try a simpler prompt.")
+
+        return jsonify(error="Invalid VIDEO_PROVIDER. Use 'google' or 'fal'.")
 
     except requests.exceptions.Timeout:
         return jsonify(error="Request timed out. Please try again.")
-    except Exception as e:
+    except Exception:
         return jsonify(error=f"Server error: {traceback.format_exc()}")
 
 @app.route("/gen_prompt", methods=["POST"])
 def gen_prompt():
     try:
-        d = request.json
+        d = request.json or {}
         return jsonify(result=llm(
-            "Professional AI video prompt writer. Always family-safe. Optimized for CogVideoX.",
-            f"Write AI video prompt for: {d['idea']}\nStyle: {d['style']} | Mood: {d['mood']} | Duration: {d['duration']}\n\n✨ MAIN PROMPT\n🎨 STYLE TAGS\n🚫 NEGATIVE PROMPT\n💡 PRO TIP"
+            "Professional educator-focused AI video prompt writer. Family-safe. Optimized for CogVideoX.",
+            f"Write an EDUCATOR-READY AI video prompt. Idea: {d.get('idea', '')}\nStyle: {d.get('style', '')} | Mood: {d.get('mood', '')} | Duration: {d.get('duration', '')}\n\nInclude: Grade Level options, Learning Objective, Classroom Activity.\n\n✨ MAIN PROMPT\n🎨 STYLE TAGS\n🎯 LEARNING OBJECTIVE\n🧩 CLASSROOM ACTIVITY\n🚫 NEGATIVE PROMPT\n💡 PRO TIP"
         ))
     except Exception:
         return jsonify(result=f"❌ {traceback.format_exc()}")
@@ -520,10 +681,10 @@ def gen_prompt():
 @app.route("/story_to_video", methods=["POST"])
 def story_to_video():
     try:
-        d = request.json
+        d = request.json or {}
         return jsonify(result=llm(
             "Professional video director. Family-safe scene prompts only. Optimized for CogVideoX.",
-            f"Break into {d['scenes']} scenes. Style: {d['style']}\nStory: {d['story']}\n\nFor each:\n🎬 SCENE [N]\n📍 Setting\n✨ AI PROMPT\n🎵 Mood"
+            f"Break into {d.get('scenes', '')} scenes. Style: {d.get('style', '')}\nStory: {d.get('story', '')}\n\nFor each:\n🎬 SCENE [N]\n📍 Setting\n✨ AI PROMPT\n🎵 Mood"
         ))
     except Exception:
         return jsonify(result=f"❌ {traceback.format_exc()}")
@@ -531,10 +692,10 @@ def story_to_video():
 @app.route("/safety_check", methods=["POST"])
 def safety_check():
     try:
-        d = request.json
+        d = request.json or {}
         return jsonify(result=llm(
             "Content safety expert for AI video generation.",
-            f"Audience: {d['audience']}\nPrompt: {d['prompt']}\n\n🛡️ RATING (Safe/Caution/Unsafe)\n✅ SAFE ELEMENTS\n⚠️ CONCERNS\n🔧 SAFE ALTERNATIVE"
+            f"Audience: {d.get('audience', '')}\nPrompt: {d.get('prompt', '')}\n\n🛡️ RATING (Safe/Caution/Unsafe)\n✅ SAFE ELEMENTS\n⚠️ CONCERNS\n🔧 SAFE ALTERNATIVE"
         ))
     except Exception:
         return jsonify(result=f"❌ {traceback.format_exc()}")
@@ -542,10 +703,10 @@ def safety_check():
 @app.route("/enhance_prompt", methods=["POST"])
 def enhance_prompt():
     try:
-        d = request.json
+        d = request.json or {}
         return jsonify(result=llm(
             "Master AI prompt engineer for cinematic safe video. Optimized for CogVideoX-5b.",
-            f"Enhance: {d['prompt']}\nCamera: {d['camera']} | Lighting: {d['lighting']}\n\n✨ ENHANCED PROMPT\n📸 TECHNICAL DETAILS\n🎨 COLORS & MOOD\n🚫 NEGATIVE PROMPT"
+            f"Enhance: {d.get('prompt', '')}\nCamera: {d.get('camera', '')} | Lighting: {d.get('lighting', '')}\n\n✨ ENHANCED PROMPT\n📸 TECHNICAL DETAILS\n🎨 COLORS & MOOD\n🚫 NEGATIVE PROMPT"
         ))
     except Exception:
         return jsonify(result=f"❌ {traceback.format_exc()}")
@@ -553,16 +714,20 @@ def enhance_prompt():
 @app.route("/gen_ideas", methods=["POST"])
 def gen_ideas():
     try:
-        d = request.json
+        d = request.json or {}
         return jsonify(result=llm(
-            "Creative content strategist for family-safe AI video.",
-            f"10 safe video ideas:\nTheme: {d['theme']} | Platform: {d['platform']} | Audience: {d['audience']}\n\nFor each:\n💡 IDEA [N]\n📝 Concept\n✨ AI Prompt\n📈 Why it works"
+            "Creative education content strategist for family-safe AI video.",
+            f"10 educator-safe video ideas:\nTheme: {d.get('theme', '')} | Platform: {d.get('platform', '')} | Audience: {d.get('audience', '')}\n\nFor each:\n💡 IDEA [N]\n📝 Concept\n🎯 Learning Goal\n✨ AI Prompt\n📈 Why it works in class"
         ))
     except Exception:
         return jsonify(result=f"❌ {traceback.format_exc()}")
 
 if __name__ == "__main__":
     print("🚀 PureVid AI starting...")
-    print(f"✅ Groq: {'Ready' if client else '❌ Missing GROQ_KEY'}")
-    print(f"✅ CogVideoX via fal.ai: {'Ready' if FAL_KEY else '❌ Missing FAL_KEY'}")
+    print(f"✅ Vertex AI text: {'Ready' if VERTEX_PROJECT_ID else 'Not configured'}")
+    print(f"✅ Video provider: {VIDEO_PROVIDER}")
+    print(f"✅ Google video model: {VERTEX_VIDEO_MODEL if VIDEO_PROVIDER == 'google' else 'n/a'}")
+    print(f"✅ fal fallback enabled: {ALLOW_FAL_FALLBACK}")
+    print(f"✅ Groq fallback: {'Ready' if client else '❌ Missing GROQ_KEY'}")
+    print(f"✅ fal provider key: {'Ready' if FAL_KEY else 'Not configured'}")
     app.run(host="0.0.0.0", port=int(os.environ.get('PORT', 5000)), debug=False)
