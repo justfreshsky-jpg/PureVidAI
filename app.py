@@ -10,7 +10,12 @@ from groq import Groq
 app = Flask(__name__)
 GROQ_KEY = os.environ.get("GROQ_KEY")
 FAL_KEY = os.environ.get("FAL_KEY")
-VERTEX_PROJECT_ID = os.environ.get("VERTEX_PROJECT_ID") or os.environ.get("GOOGLE_CLOUD_PROJECT")
+VERTEX_PROJECT_ID = (
+    os.environ.get("VERTEX_PROJECT_ID")
+    or os.environ.get("GOOGLE_CLOUD_PROJECT")
+    or os.environ.get("GCP_PROJECT")
+    or os.environ.get("GCLOUD_PROJECT")
+)
 VERTEX_LOCATION = os.environ.get("VERTEX_LOCATION", "us-central1")
 VERTEX_MODEL = os.environ.get("VERTEX_MODEL", "gemini-1.5-flash")
 VIDEO_PROVIDER = os.environ.get("VIDEO_PROVIDER", "google").lower()  # google|fal
@@ -87,20 +92,13 @@ def _sanitize_text(text):
 
 
 def _vertex_llm(full_system, user):
-    if not VERTEX_PROJECT_ID:
-        return None
+    token, project_id = _get_google_auth_context()
+    if not project_id:
+        raise RuntimeError("Google Cloud project is not configured. Set VERTEX_PROJECT_ID or GOOGLE_CLOUD_PROJECT.")
 
-    try:
-        import google.auth
-        from google.auth.transport.requests import Request as GoogleAuthRequest
-    except ImportError as exc:
-        raise RuntimeError("google-auth package is required for Vertex AI mode.") from exc
-
-    creds, _ = google.auth.default(scopes=["https://www.googleapis.com/auth/cloud-platform"])
-    creds.refresh(GoogleAuthRequest())
     endpoint = (
         f"https://{VERTEX_LOCATION}-aiplatform.googleapis.com/v1/projects/"
-        f"{VERTEX_PROJECT_ID}/locations/{VERTEX_LOCATION}/publishers/google/models/"
+        f"{project_id}/locations/{VERTEX_LOCATION}/publishers/google/models/"
         f"{VERTEX_MODEL}:generateContent"
     )
     payload = {
@@ -111,7 +109,7 @@ def _vertex_llm(full_system, user):
     }
     res = requests.post(
         endpoint,
-        headers={"Authorization": f"Bearer {creds.token}", "Content-Type": "application/json"},
+        headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json"},
         json=payload,
         timeout=40,
     )
@@ -151,18 +149,16 @@ def llm(system, user):
 
     full_system = system + "\n\n" + educator_prompt + "\n\nReference data:\n" + get_context()
 
-    if VERTEX_PROJECT_ID:
-        try:
-            return _vertex_llm(full_system, user)
-        except Exception:
-            if client:
-                return _groq_llm(full_system, user)
-            return f"❌ Vertex AI failed:\n{traceback.format_exc()}"
+    try:
+        return _vertex_llm(full_system, user)
+    except Exception:
+        if client:
+            return _groq_llm(full_system, user)
 
     if client:
         return _groq_llm(full_system, user)
 
-    return "❌ Missing AI config. Set VERTEX_PROJECT_ID (or GOOGLE_CLOUD_PROJECT) or GROQ_KEY."
+    return "❌ Missing AI config. Configure Google Cloud ADC (or set VERTEX_PROJECT_ID) or provide GROQ_KEY."
 
 # ── HTML ─────────────────────────────────────────────────────
 HTML = """<!DOCTYPE html>
@@ -221,12 +217,26 @@ textarea{resize:vertical;min-height:90px}
 hr{border:none;border-top:1px solid #e8eaf0;margin:18px 0}
 .tip-box{background:#eff6ff;border-left:3px solid var(--bl);padding:12px 14px;border-radius:0 10px 10px 0;font-size:13px;color:#1e40af;margin-top:12px}
 .footer{text-align:center;padding:28px 16px;color:var(--gray);font-size:13px;line-height:2;background:var(--w);border-radius:16px;margin-top:20px}
+.topnav{display:flex;justify-content:center;gap:10px;flex-wrap:wrap;margin:14px 0 4px}
+.topnav a{color:#fff;text-decoration:none;font-weight:700;font-size:12px;padding:6px 10px;border:1px solid rgba(255,255,255,.35);border-radius:999px;background:rgba(255,255,255,.12)}
+.topnav a:hover{background:rgba(255,255,255,.22)}
+.quickstart{background:#ffffffd9;border:1px solid #dbeafe;border-radius:14px;padding:14px;margin:0 auto 18px;max-width:960px}
+.quickstart h3{color:var(--bd);font-size:16px;margin-bottom:8px}
+.step-list{display:grid;grid-template-columns:1fr;gap:8px;font-size:13px;color:#334155}
+@media(min-width:800px){.step-list{grid-template-columns:repeat(3,1fr)}}
+.step{background:#f8fbff;border:1px solid #dbeafe;border-radius:10px;padding:10px}
+.examples{display:flex;gap:8px;flex-wrap:wrap;margin-top:10px}
+.ex{border:1px solid var(--border);background:#fff;color:#1d4ed8;border-radius:999px;padding:6px 10px;font-size:12px;cursor:pointer}
+.ex:hover{background:#eff6ff}
 </style>
 </head>
 <body>
 <div class="header">
   <h1>🎥 PureVid AI</h1>
   <p><b>Beautiful, classroom-ready AI videos and teaching content for educators</b></p>
+  <div class="topnav">
+    <a href="#generate">Start</a><a href="#prompt">Prompts</a><a href="#safety">Safety</a><a href="#ideas">Ideas</a>
+  </div>
   <div class="badges">
     <span class="badge">✅ Classroom Safe</span>
     <span class="badge">🔒 No Data Stored</span>
@@ -236,6 +246,14 @@ hr{border:none;border-top:1px solid #e8eaf0;margin:18px 0}
 </div>
 
 <div class="container">
+  <div class="quickstart">
+    <h3>✨ Quick start for busy teachers</h3>
+    <div class="step-list">
+      <div class="step"><b>1) Describe your lesson moment</b><br/>Topic, grade level, and classroom activity.</div>
+      <div class="step"><b>2) Generate and review</b><br/>Wait for the video, then check safety and clarity.</div>
+      <div class="step"><b>3) Download and use</b><br/>Use in class, LMS, or social channels.</div>
+    </div>
+  </div>
   <div class="tabs">
     <button class="active" onclick="show('generate',this)"><span class="tab-icon">🎬</span>Generate</button>
     <button onclick="show('prompt',this)"><span class="tab-icon">✨</span>Prompts</button>
@@ -253,6 +271,11 @@ hr{border:none;border-top:1px solid #e8eaf0;margin:18px 0}
     <div class="field">
       <label>What do you want in your video?</label>
       <textarea id="vp" rows="4" placeholder="e.g. Grade 5 science class exploring the water cycle with simple animations, bright classroom lighting, cinematic..."></textarea>
+      <div class="examples">
+        <button class="ex" type="button" onclick="setExample('Grade 4 math lesson on fractions with colorful blocks, friendly classroom, clean visuals')">Math Example</button>
+        <button class="ex" type="button" onclick="setExample('Middle school history scene showing ancient Egypt timeline, museum style, cinematic')">History Example</button>
+        <button class="ex" type="button" onclick="setExample('Kindergarten phonics lesson with playful letter animations, warm classroom, joyful mood')">ELA Example</button>
+      </div>
     </div>
     <div class="field">
       <label>Aspect Ratio</label>
@@ -265,13 +288,13 @@ hr{border:none;border-top:1px solid #e8eaf0;margin:18px 0}
     <div class="tip-box">💡 Add words like <b>cinematic, golden light, slow motion, peaceful, nature</b> for better results. Unsafe words are auto-blocked.</div>
     <button class="btn green" id="vbtn" onclick="generateVideo()">🎬 Generate Video</button>
     <div class="progress" id="prog"><div class="progress-bar" id="progbar"></div></div>
-    <div id="vstatus" style="text-align:center;color:var(--gray);font-size:13px;margin-top:8px"></div>
+    <div id="vstatus" aria-live="polite" style="text-align:center;color:var(--gray);font-size:13px;margin-top:8px"></div>
     <div class="video-box" id="vbox">
       <video id="vplayer" controls autoplay loop></video><br>
       <a id="vdownload" class="download-btn" download="purevid.mp4">⬇️ Download Video</a>
     </div>
     <div class="output-wrap" style="margin-top:10px">
-      <div id="vo" class="output" style="min-height:30px"></div>
+      <div id="vo" class="output" aria-live="polite" style="min-height:30px"></div>
     </div>
   </div></div>
 
@@ -389,6 +412,7 @@ hr{border:none;border-top:1px solid #e8eaf0;margin:18px 0}
 
 <script>
 function g(id){return document.getElementById(id).value;}
+function setExample(text){document.getElementById('vp').value=text;document.getElementById('vp').focus();}
 function show(tab,btn){
   document.querySelectorAll('.tab').forEach(t=>t.classList.remove('active'));
   document.querySelectorAll('.tabs button').forEach(b=>b.classList.remove('active'));
@@ -481,27 +505,28 @@ async function generateVideo(){
 </body>
 </html>"""
 
-def _get_google_auth_token():
+def _get_google_auth_context():
     try:
         import google.auth
         from google.auth.transport.requests import Request as GoogleAuthRequest
     except ImportError as exc:
         raise RuntimeError("google-auth package is required for Google Cloud mode.") from exc
 
-    creds, _ = google.auth.default(scopes=["https://www.googleapis.com/auth/cloud-platform"])
+    creds, adc_project = google.auth.default(scopes=["https://www.googleapis.com/auth/cloud-platform"])
     creds.refresh(GoogleAuthRequest())
-    return creds.token
+    project_id = VERTEX_PROJECT_ID or adc_project
+    return creds.token, project_id
 
 
 def _vertex_generate_video(prompt, ratio):
-    if not VERTEX_PROJECT_ID:
+    token, project_id = _get_google_auth_context()
+    if not project_id:
         raise RuntimeError("Google Cloud project is not configured. Set VERTEX_PROJECT_ID or GOOGLE_CLOUD_PROJECT.")
 
     ratio_map = {"16:9": "16:9", "9:16": "9:16", "1:1": "1:1"}
-    token = _get_google_auth_token()
     endpoint = (
         f"https://{VERTEX_LOCATION}-aiplatform.googleapis.com/v1/projects/"
-        f"{VERTEX_PROJECT_ID}/locations/{VERTEX_LOCATION}/publishers/google/models/"
+        f"{project_id}/locations/{VERTEX_LOCATION}/publishers/google/models/"
         f"{VERTEX_VIDEO_MODEL}:predictLongRunning"
     )
     payload = {
@@ -564,7 +589,7 @@ def generate_video():
             return jsonify(error="🚫 Unsafe content detected. Please use family-friendly descriptions.")
 
         final_prompt = raw_prompt
-        if client or VERTEX_PROJECT_ID:
+        if client or VIDEO_PROVIDER == "google":
             try:
                 final_prompt = llm(
                     "Expert prompt enhancer for safe AI video generation. CogVideoX works best with detailed cinematic scene descriptions.",

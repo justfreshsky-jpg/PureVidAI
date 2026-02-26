@@ -5,10 +5,10 @@ Educator-ready AI video and teaching-content assistant.
 ## Environment variables
 
 ### Recommended (Google Cloud Vertex AI)
-- `VERTEX_PROJECT_ID` (or `GOOGLE_CLOUD_PROJECT`)
+- `VERTEX_PROJECT_ID` (or `GOOGLE_CLOUD_PROJECT`, `GCP_PROJECT`, `GCLOUD_PROJECT`)
 - `VERTEX_LOCATION` (optional, default: `us-central1`)
 - `VERTEX_MODEL` (optional, default: `gemini-1.5-flash`)
-- Workload/service account with Vertex AI access (`aiplatform.endpoints.predict` permission).
+- Workload/service account with Vertex AI access (`aiplatform.endpoints.predict` permission). If your ADC includes a project, PureVid can auto-detect it.
 
 ### Optional fallback
 - `GROQ_KEY` (used when Vertex AI is not configured or as fallback if enabled)
