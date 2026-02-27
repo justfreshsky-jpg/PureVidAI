@@ -59,18 +59,21 @@ def _fetch_tips():
         for url in sources:
             try:
                 r = requests.get(url, headers=headers, timeout=6)
+                r.raise_for_status()
                 soup = BeautifulSoup(r.text, "html.parser")
                 for tag in soup(["script","style","nav","header","footer"]):
                     tag.decompose()
                 text = soup.get_text(separator=" ", strip=True)
                 combined += text[:1500] + "\n---\n"
-            except Exception:
-                continue
+            except requests.exceptions.RequestException as exc:
+                logger.warning("_fetch_tips: failed to fetch %s: %s", url, exc)
+            except Exception as exc:
+                logger.warning("_fetch_tips: unexpected error for %s: %s", url, exc)
         if combined.strip():
             _cache["content"] = combined[:5000]
             _cache["last"] = time.time()
-    except Exception:
-        pass
+    except Exception as exc:
+        logger.error("_fetch_tips: unexpected error: %s", exc)
 
 def _bg_refresh():
     while True:
@@ -244,7 +247,7 @@ hr{border:none;border-top:1px solid #e8eaf0;margin:18px 0}
     <button class="nav-pill" type="button" onclick="switchTab('generate')">Start</button><button class="nav-pill" type="button" onclick="switchTab('prompt')">Prompts</button><button class="nav-pill" type="button" onclick="switchTab('story')">Story</button><button class="nav-pill" type="button" onclick="switchTab('safety')">Safety</button><button class="nav-pill" type="button" onclick="switchTab('enhance')">Enhance</button><button class="nav-pill" type="button" onclick="switchTab('ideas')">Ideas</button><button class="nav-pill" type="button" onclick="switchTab('followup')">Ask More</button><button class="nav-pill" type="button" onclick="switchTab('feedback')">Feedback</button>
   </div>
   <div class="badges">
-    <span class="badge">✅ Family Safe</span>
+    <span class="badge">✅ Classroom Safe</span>
     <span class="badge">🔒 No Data Stored</span>
     <span class="badge">🌍 General Users</span>
     <span class="badge">⚡ Powered by CogVideoX</span>
