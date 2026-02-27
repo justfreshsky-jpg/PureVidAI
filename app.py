@@ -1,8 +1,6 @@
 import os
 os.environ['HTTPX_PROXIES'] = 'null'  # Fix Render/httpx proxies bug
 import re
-import logging
-import logging.handlers
 import traceback, time, threading
 import requests
 from bs4 import BeautifulSoup
@@ -10,26 +8,6 @@ from flask import Flask, request, jsonify, render_template_string
 from groq import Groq
 
 app = Flask(__name__)
-
-# ── LOGGING ─────────────────────────────────────────────────
-_log_handler = logging.handlers.RotatingFileHandler(
-    "app.log", maxBytes=5 * 1024 * 1024, backupCount=3, encoding="utf-8"
-)
-_log_handler.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(name)s: %(message)s"))
-logging.basicConfig(level=logging.INFO, handlers=[_log_handler, logging.StreamHandler()])
-logger = logging.getLogger(__name__)
-
-# ── INPUT VALIDATION ────────────────────────────────────────
-MAX_PROMPT_LEN = 2000
-MAX_STORY_LEN  = 5000
-MAX_CONTEXT_LEN = 4000
-MAX_SHORT_LEN  = 300
-MAX_FEEDBACK_MSG_LEN = 2000
-
-def _clamp(value, max_len):
-    """Return value truncated to max_len characters (must be > 0), or empty string if None."""
-    return (value or "")[:max_len]
-
 FEEDBACK_LOG = []
 GROQ_KEY = os.environ.get("GROQ_KEY")
 FAL_KEY = os.environ.get("FAL_KEY")
@@ -44,6 +22,7 @@ VERTEX_MODEL = os.environ.get("VERTEX_MODEL", "gemini-1.5-flash")
 VIDEO_PROVIDER = os.environ.get("VIDEO_PROVIDER", "google").strip().lower()  # google|fal
 VERTEX_VIDEO_MODEL = os.environ.get("VERTEX_VIDEO_MODEL", "veo-2.0-generate-001")
 ALLOW_FAL_FALLBACK = os.environ.get("ALLOW_FAL_FALLBACK", "false").lower() == "true"
+FEEDBACK_LOG_PATH = os.environ.get("FEEDBACK_LOG_PATH", "/tmp/purevid_feedback.log.jsonl")
 client = Groq(api_key=GROQ_KEY) if GROQ_KEY else None
 
 UNSAFE = ["nudity","naked","violence","blood","kill","alcohol","drugs","gambling","weapon","gore","nsfw","sexy","adult","explicit","hate","terrorist"]
@@ -173,7 +152,7 @@ def _groq_llm(full_system, user):
 
 def llm(system, user):
     assistant_prompt = """
-    🎓 EDUCATOR-FIRST CREATIVE ASSISTANT
+    🌍 GENERAL CREATIVE ASSISTANT
     ✅ Produce clear outputs that general users can use quickly.
     ✅ Include practical options, clear structure, and useful suggestions.
     ✅ Keep tone practical, family-safe, and globally usable.
@@ -663,7 +642,7 @@ def index():
 def generate_video():
     try:
         d = _json_body()
-        raw_prompt = _clamp(d.get("prompt", ""), MAX_PROMPT_LEN).strip()
+        raw_prompt = d.get("prompt", "").strip()
         ratio = d.get("ratio", "16:9")
 
         if not raw_prompt:
@@ -756,7 +735,7 @@ def gen_prompt():
         d = _json_body()
         return jsonify(result=llm(
             "Professional AI video prompt writer for general users. Family-safe. Optimized for CogVideoX.",
-            f"Write a polished AI video prompt. Idea: {_clamp(d.get('idea', ''), MAX_PROMPT_LEN)}\nStyle: {_clamp(d.get('style', ''), MAX_SHORT_LEN)} | Mood: {_clamp(d.get('mood', ''), MAX_SHORT_LEN)} | Duration: {_clamp(d.get('duration', ''), MAX_SHORT_LEN)}\n\nInclude: style options, shot suggestions, and practical tips.\n\n✨ MAIN PROMPT\n🎨 STYLE TAGS\n🎯 CREATIVE GOAL\n🧩 PRACTICAL USE\n🚫 NEGATIVE PROMPT\n💡 PRO TIP"
+            f"Write a polished AI video prompt. Idea: {d.get('idea', '')}\nStyle: {d.get('style', '')} | Mood: {d.get('mood', '')} | Duration: {d.get('duration', '')}\n\nInclude: style options, shot suggestions, and practical tips.\n\n✨ MAIN PROMPT\n🎨 STYLE TAGS\n🎯 CREATIVE GOAL\n🧩 PRACTICAL USE\n🚫 NEGATIVE PROMPT\n💡 PRO TIP"
         ))
     except Exception:
         return jsonify(result=f"❌ {traceback.format_exc()}")
@@ -767,7 +746,7 @@ def story_to_video():
         d = _json_body()
         return jsonify(result=llm(
             "Professional video director. Family-safe scene prompts only. Optimized for CogVideoX.",
-            f"Break into {_clamp(d.get('scenes', ''), MAX_SHORT_LEN)} scenes. Style: {_clamp(d.get('style', ''), MAX_SHORT_LEN)}\nStory: {_clamp(d.get('story', ''), MAX_STORY_LEN)}\n\nFor each:\n🎬 SCENE [N]\n📍 Setting\n✨ AI PROMPT\n🎵 Mood"
+            f"Break into {d.get('scenes', '')} scenes. Style: {d.get('style', '')}\nStory: {d.get('story', '')}\n\nFor each:\n🎬 SCENE [N]\n📍 Setting\n✨ AI PROMPT\n🎵 Mood"
         ))
     except Exception:
         return jsonify(result=f"❌ {traceback.format_exc()}")
@@ -778,7 +757,7 @@ def safety_check():
         d = _json_body()
         return jsonify(result=llm(
             "Content safety expert for AI video generation.",
-            f"Audience: {_clamp(d.get('audience', ''), MAX_SHORT_LEN)}\nPrompt: {_clamp(d.get('prompt', ''), MAX_PROMPT_LEN)}\n\n🛡️ RATING (Safe/Caution/Unsafe)\n✅ SAFE ELEMENTS\n⚠️ CONCERNS\n🔧 SAFE ALTERNATIVE"
+            f"Audience: {d.get('audience', '')}\nPrompt: {d.get('prompt', '')}\n\n🛡️ RATING (Safe/Caution/Unsafe)\n✅ SAFE ELEMENTS\n⚠️ CONCERNS\n🔧 SAFE ALTERNATIVE"
         ))
     except Exception:
         return jsonify(result=f"❌ {traceback.format_exc()}")
@@ -789,7 +768,7 @@ def enhance_prompt():
         d = _json_body()
         return jsonify(result=llm(
             "Master AI prompt engineer for cinematic safe video. Optimized for CogVideoX-5b.",
-            f"Enhance: {_clamp(d.get('prompt', ''), MAX_PROMPT_LEN)}\nCamera: {_clamp(d.get('camera', ''), MAX_SHORT_LEN)} | Lighting: {_clamp(d.get('lighting', ''), MAX_SHORT_LEN)}\n\n✨ ENHANCED PROMPT\n📸 TECHNICAL DETAILS\n🎨 COLORS & MOOD\n🚫 NEGATIVE PROMPT"
+            f"Enhance: {d.get('prompt', '')}\nCamera: {d.get('camera', '')} | Lighting: {d.get('lighting', '')}\n\n✨ ENHANCED PROMPT\n📸 TECHNICAL DETAILS\n🎨 COLORS & MOOD\n🚫 NEGATIVE PROMPT"
         ))
     except Exception:
         return jsonify(result=f"❌ {traceback.format_exc()}")
@@ -800,7 +779,7 @@ def gen_ideas():
         d = _json_body()
         return jsonify(result=llm(
             "Creative content strategist for family-safe AI video.",
-            f"10 family-safe video ideas:\nTheme: {_clamp(d.get('theme', ''), MAX_SHORT_LEN)} | Platform: {_clamp(d.get('platform', ''), MAX_SHORT_LEN)} | Audience: {_clamp(d.get('audience', ''), MAX_SHORT_LEN)}\n\nFor each:\n💡 IDEA [N]\n📝 Concept\n🎯 Goal\n✨ AI Prompt\n📈 Why it works"
+            f"10 family-safe video ideas:\nTheme: {d.get('theme', '')} | Platform: {d.get('platform', '')} | Audience: {d.get('audience', '')}\n\nFor each:\n💡 IDEA [N]\n📝 Concept\n🎯 Goal\n✨ AI Prompt\n📈 Why it works"
         ))
     except Exception:
         return jsonify(result=f"❌ {traceback.format_exc()}")
@@ -809,8 +788,8 @@ def gen_ideas():
 def follow_up():
     try:
         d = _json_body()
-        context = _clamp(d.get("context", "").strip(), MAX_CONTEXT_LEN)
-        question = _clamp(d.get("question", "").strip(), MAX_PROMPT_LEN)
+        context = d.get("context", "").strip()
+        question = d.get("question", "").strip()
         if not question:
             return jsonify(result="❌ Please provide a follow-up question.")
         return jsonify(result=llm(
@@ -825,22 +804,22 @@ def follow_up():
 def feedback():
     try:
         d = _json_body()
-        message = _clamp((d.get("message") or "").strip(), MAX_FEEDBACK_MSG_LEN)
+        message = (d.get("message") or "").strip()
         if not message:
             return jsonify(ok=False, error="Please provide feedback message.")
         entry = {
             "time": int(time.time()),
-            "name": _clamp((d.get("name") or "").strip(), 120),
-            "email": _clamp((d.get("email") or "").strip(), 200),
-            "message": message,
+            "name": (d.get("name") or "").strip()[:120],
+            "email": (d.get("email") or "").strip()[:200],
+            "message": message[:2000],
         }
         FEEDBACK_LOG.append(entry)
         try:
             import json
-            with open("feedback.log.jsonl", "a", encoding="utf-8") as f:
+            with open(FEEDBACK_LOG_PATH, "a", encoding="utf-8") as f:
                 f.write(json.dumps(entry, ensure_ascii=False) + "\n")
-        except Exception as exc:
-            logger.error("feedback: failed to write log entry: %s", exc)
+        except Exception:
+            pass
         return jsonify(ok=True, result="✅ Thanks! Your feedback was submitted successfully.")
     except Exception:
         return jsonify(ok=False, error=f"Server error: {traceback.format_exc()}")
@@ -849,7 +828,7 @@ def feedback():
 if __name__ == "__main__":
     print("🚀 PureVid AI starting...")
     print(f"✅ Vertex AI text: {'Ready' if VERTEX_PROJECT_ID else 'Not configured'}")
-    print(f"✅ Video provider: {VIDEO_PROVIDER}")
+    print(f"✅ Video provider: {_normalized_video_provider()}")
     print(f"✅ Google video model: {VERTEX_VIDEO_MODEL if VIDEO_PROVIDER == 'google' else 'n/a'}")
     print(f"✅ fal fallback enabled: {ALLOW_FAL_FALLBACK}")
     print(f"✅ Groq fallback: {'Ready' if client else '❌ Missing GROQ_KEY'}")
