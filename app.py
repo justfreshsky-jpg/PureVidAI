@@ -243,7 +243,7 @@ hr{border:none;border-top:1px solid #e8eaf0;margin:18px 0}
     <button class="nav-pill" type="button" onclick="switchTab('generate')">Start</button><button class="nav-pill" type="button" onclick="switchTab('prompt')">Prompts</button><button class="nav-pill" type="button" onclick="switchTab('story')">Story</button><button class="nav-pill" type="button" onclick="switchTab('safety')">Safety</button><button class="nav-pill" type="button" onclick="switchTab('enhance')">Enhance</button><button class="nav-pill" type="button" onclick="switchTab('ideas')">Ideas</button><button class="nav-pill" type="button" onclick="switchTab('followup')">Ask More</button><button class="nav-pill" type="button" onclick="switchTab('feedback')">Feedback</button>
   </div>
   <div class="badges">
-    <span class="badge">✅ Family Safe</span>
+    <span class="badge">✅ Classroom Safe</span>
     <span class="badge">🔒 No Data Stored</span>
     <span class="badge">🌍 General Users</span>
     <span class="badge">⚡ Powered by CogVideoX</span>
