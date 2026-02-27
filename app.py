@@ -19,7 +19,7 @@ VERTEX_PROJECT_ID = (
 )
 VERTEX_LOCATION = os.environ.get("VERTEX_LOCATION", "us-central1")
 VERTEX_MODEL = os.environ.get("VERTEX_MODEL", "gemini-1.5-flash")
-VIDEO_PROVIDER = os.environ.get("VIDEO_PROVIDER", "google").lower()  # google|fal
+VIDEO_PROVIDER = os.environ.get("VIDEO_PROVIDER", "google").strip().lower()  # google|fal
 VERTEX_VIDEO_MODEL = os.environ.get("VERTEX_VIDEO_MODEL", "veo-2.0-generate-001")
 ALLOW_FAL_FALLBACK = os.environ.get("ALLOW_FAL_FALLBACK", "false").lower() == "true"
 client = Groq(api_key=GROQ_KEY) if GROQ_KEY else None
@@ -85,6 +85,9 @@ def _normalized_video_provider():
     provider = (VIDEO_PROVIDER or "google").strip().lower()
     return provider if provider in {"google", "fal"} else "google"
 
+def _json_body():
+    return request.get_json(silent=True) or {}
+
 # ── LLM ─────────────────────────────────────────────────────
 def _sanitize_text(text):
     text = (text or "").replace('**', '')
@@ -144,24 +147,21 @@ def _groq_llm(full_system, user):
 
 
 def llm(system, user):
-    educator_prompt = """
+    assistant_prompt = """
     🎓 EDUCATOR-FIRST CREATIVE ASSISTANT
-    ✅ Produce clear outputs teachers can use quickly in real classrooms.
-    ✅ Include grade-level options, activity ideas, and assessment-friendly suggestions.
-    ✅ Keep tone practical, classroom-safe, and globally usable.
+    ✅ Produce clear outputs that general users can use quickly.
+    ✅ Include practical options, clear structure, and useful suggestions.
+    ✅ Keep tone practical, family-safe, and globally usable.
     ✅ Avoid violence, explicit, hateful, or unsafe content.
     """
 
-    full_system = system + "\n\n" + educator_prompt + "\n\nReference data:\n" + get_context()
+    full_system = system + "\n\n" + assistant_prompt + "\n\nReference data:\n" + get_context()
 
     try:
         return _vertex_llm(full_system, user)
     except Exception:
         if client:
             return _groq_llm(full_system, user)
-
-    if client:
-        return _groq_llm(full_system, user)
 
     return "❌ Missing AI config. Configure Google Cloud ADC (or set VERTEX_PROJECT_ID) or provide GROQ_KEY."
 
@@ -171,7 +171,7 @@ HTML = """<!DOCTYPE html>
 <head>
 <title>🎥 PureVid AI</title>
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<meta name="description" content="Educator-ready AI video and lesson idea generator. Family-safe and classroom-friendly.">
+<meta name="description" content="AI video and prompt generator for general users. Family-safe and easy to use.">
 <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
 <style>
 :root{--bd:#1a2e4a;--bm:#2563eb;--bl:#60a5fa;--pale:#f0f4ff;--border:#bfdbfe;--w:#fff;--gray:#666;--r:12px}
@@ -223,8 +223,8 @@ hr{border:none;border-top:1px solid #e8eaf0;margin:18px 0}
 .tip-box{background:#eff6ff;border-left:3px solid var(--bl);padding:12px 14px;border-radius:0 10px 10px 0;font-size:13px;color:#1e40af;margin-top:12px}
 .footer{text-align:center;padding:28px 16px;color:var(--gray);font-size:13px;line-height:2;background:var(--w);border-radius:16px;margin-top:20px}
 .topnav{display:flex;justify-content:center;gap:10px;flex-wrap:wrap;margin:14px 0 4px}
-.topnav a{color:#fff;text-decoration:none;font-weight:700;font-size:12px;padding:6px 10px;border:1px solid rgba(255,255,255,.35);border-radius:999px;background:rgba(255,255,255,.12)}
-.topnav a:hover{background:rgba(255,255,255,.22)}
+.nav-pill{color:#fff;text-decoration:none;font-weight:700;font-size:12px;padding:6px 10px;border:1px solid rgba(255,255,255,.35);border-radius:999px;background:rgba(255,255,255,.12);cursor:pointer}
+.nav-pill:hover{background:rgba(255,255,255,.22)}
 .quickstart{background:#ffffffd9;border:1px solid #dbeafe;border-radius:14px;padding:14px;margin:0 auto 18px;max-width:960px}
 .quickstart h3{color:var(--bd);font-size:16px;margin-bottom:8px}
 .step-list{display:grid;grid-template-columns:1fr;gap:8px;font-size:13px;color:#334155}
@@ -238,25 +238,25 @@ hr{border:none;border-top:1px solid #e8eaf0;margin:18px 0}
 <body>
 <div class="header">
   <h1>🎥 PureVid AI</h1>
-  <p><b>Beautiful, classroom-ready AI videos and teaching content for educators</b></p>
+  <p><b>Beautiful, family-safe AI videos and creative content for everyone</b></p>
   <div class="topnav">
-    <a href="#generate">Start</a><a href="#prompt">Prompts</a><a href="#safety">Safety</a><a href="#ideas">Ideas</a>
+    <button class="nav-pill" type="button" onclick="switchTab('generate')">Start</button><button class="nav-pill" type="button" onclick="switchTab('prompt')">Prompts</button><button class="nav-pill" type="button" onclick="switchTab('story')">Story</button><button class="nav-pill" type="button" onclick="switchTab('safety')">Safety</button><button class="nav-pill" type="button" onclick="switchTab('enhance')">Enhance</button><button class="nav-pill" type="button" onclick="switchTab('ideas')">Ideas</button><button class="nav-pill" type="button" onclick="switchTab('followup')">Ask More</button><button class="nav-pill" type="button" onclick="switchTab('feedback')">Feedback</button>
   </div>
   <div class="badges">
     <span class="badge">✅ Classroom Safe</span>
     <span class="badge">🔒 No Data Stored</span>
-    <span class="badge">🎓 Educator Friendly</span>
+    <span class="badge">🌍 General Users</span>
     <span class="badge">⚡ Powered by CogVideoX</span>
   </div>
 </div>
 
 <div class="container">
   <div class="quickstart">
-    <h3>✨ Quick start for busy teachers</h3>
+    <h3>✨ Quick start for everyone</h3>
     <div class="step-list">
-      <div class="step"><b>1) Describe your lesson moment</b><br/>Topic, grade level, and classroom activity.</div>
+      <div class="step"><b>1) Describe your idea</b><br/>What should happen in the video and the style you want.</div>
       <div class="step"><b>2) Generate and review</b><br/>Wait for the video, then check safety and clarity.</div>
-      <div class="step"><b>3) Download and use</b><br/>Use in class, LMS, or social channels.</div>
+      <div class="step"><b>3) Download and share</b><br/>Use on social media, presentations, or personal projects.</div>
     </div>
   </div>
   <div class="tabs">
@@ -272,16 +272,16 @@ hr{border:none;border-top:1px solid #e8eaf0;margin:18px 0}
 
   <!-- GENERATE -->
   <div id="generate" class="tab active"><div class="card">
-    <h2>🎬 Generate a Teaching Video</h2>
-    <p class="hint">Describe your lesson moment (topic, grade, activity). PureVid AI creates a family-safe educational video with CogVideoX. Takes 2–4 minutes.</p>
+    <h2>🎬 Generate a Video</h2>
+    <p class="hint">Describe your idea (subject, scene, mood). PureVid AI creates a family-safe video with CogVideoX. Takes 2–4 minutes.</p>
     <hr>
     <div class="field">
       <label>What do you want in your video?</label>
-      <textarea id="vp" rows="4" placeholder="e.g. Grade 5 science class exploring the water cycle with simple animations, bright classroom lighting, cinematic..."></textarea>
+      <textarea id="vp" rows="4" placeholder="e.g. A peaceful mountain sunrise with cinematic drone movement, warm colors, soft clouds..."></textarea>
       <div class="examples">
-        <button class="ex" type="button" onclick="setExample('Grade 4 math lesson on fractions with colorful blocks, friendly classroom, clean visuals')">Math Example</button>
-        <button class="ex" type="button" onclick="setExample('Middle school history scene showing ancient Egypt timeline, museum style, cinematic')">History Example</button>
-        <button class="ex" type="button" onclick="setExample('Kindergarten phonics lesson with playful letter animations, warm classroom, joyful mood')">ELA Example</button>
+        <button class="ex" type="button" onclick="setExample('Serene forest river at sunrise, cinematic lighting, slow camera pan, photorealistic')">Nature Example</button>
+        <button class="ex" type="button" onclick="setExample('A traveler walking through an old city market at golden hour, cinematic and detailed')">Travel Example</button>
+        <button class="ex" type="button" onclick="setExample('A cozy morning coffee scene by a window with rain outside, warm mood, shallow depth of field')">Lifestyle Example</button>
       </div>
     </div>
     <div class="field">
@@ -437,7 +437,7 @@ hr{border:none;border-top:1px solid #e8eaf0;margin:18px 0}
 </div>
 
 <div class="footer">
-  🎥 <strong>PureVid AI</strong> | Educator-ready AI video + lesson support <br>
+  🎥 <strong>PureVid AI</strong> | Family-safe AI video + prompt support <br>
   🔒 No data stored | ✅ Family safe always<br>
   <span style="font-size:.8em;color:#94a3b8">
     ⚠️ AI-generated content may contain errors or unexpected results. This tool is provided
@@ -449,6 +449,7 @@ hr{border:none;border-top:1px solid #e8eaf0;margin:18px 0}
 <script>
 function g(id){return document.getElementById(id).value;}
 function setExample(text){document.getElementById('vp').value=text;document.getElementById('vp').focus();}
+function switchTab(tab){const b=document.getElementById('tab-'+tab);if(b)show(tab,b);}
 function show(tab,btn){
   document.querySelectorAll('.tab').forEach(t=>t.classList.remove('active'));
   document.querySelectorAll('.tabs button').forEach(b=>b.classList.remove('active'));
@@ -636,7 +637,7 @@ def index():
 @app.route("/generate_video", methods=["POST"])
 def generate_video():
     try:
-        d = request.json or {}
+        d = _json_body()
         raw_prompt = d.get("prompt", "").strip()
         ratio = d.get("ratio", "16:9")
 
@@ -655,7 +656,7 @@ def generate_video():
             except Exception:
                 final_prompt = raw_prompt
 
-        provider = VIDEO_PROVIDER
+        provider = _normalized_video_provider()
         if provider == "google":
             try:
                 video_url = _vertex_generate_video(final_prompt, ratio)
@@ -717,7 +718,7 @@ def generate_video():
 
             return jsonify(error="Timed out after 10 minutes. Try a simpler prompt.")
 
-        return jsonify(error="Invalid VIDEO_PROVIDER. Use 'google' or 'fal'.")
+        return jsonify(error="Video provider configuration is invalid. Use 'google' or 'fal'.")
 
     except requests.exceptions.Timeout:
         return jsonify(error="Request timed out. Please try again.")
@@ -727,10 +728,10 @@ def generate_video():
 @app.route("/gen_prompt", methods=["POST"])
 def gen_prompt():
     try:
-        d = request.json or {}
+        d = _json_body()
         return jsonify(result=llm(
-            "Professional educator-focused AI video prompt writer. Family-safe. Optimized for CogVideoX.",
-            f"Write an EDUCATOR-READY AI video prompt. Idea: {d.get('idea', '')}\nStyle: {d.get('style', '')} | Mood: {d.get('mood', '')} | Duration: {d.get('duration', '')}\n\nInclude: Grade Level options, Learning Objective, Classroom Activity.\n\n✨ MAIN PROMPT\n🎨 STYLE TAGS\n🎯 LEARNING OBJECTIVE\n🧩 CLASSROOM ACTIVITY\n🚫 NEGATIVE PROMPT\n💡 PRO TIP"
+            "Professional AI video prompt writer for general users. Family-safe. Optimized for CogVideoX.",
+            f"Write a polished AI video prompt. Idea: {d.get('idea', '')}\nStyle: {d.get('style', '')} | Mood: {d.get('mood', '')} | Duration: {d.get('duration', '')}\n\nInclude: style options, shot suggestions, and practical tips.\n\n✨ MAIN PROMPT\n🎨 STYLE TAGS\n🎯 CREATIVE GOAL\n🧩 PRACTICAL USE\n🚫 NEGATIVE PROMPT\n💡 PRO TIP"
         ))
     except Exception:
         return jsonify(result=f"❌ {traceback.format_exc()}")
@@ -738,7 +739,7 @@ def gen_prompt():
 @app.route("/story_to_video", methods=["POST"])
 def story_to_video():
     try:
-        d = request.json or {}
+        d = _json_body()
         return jsonify(result=llm(
             "Professional video director. Family-safe scene prompts only. Optimized for CogVideoX.",
             f"Break into {d.get('scenes', '')} scenes. Style: {d.get('style', '')}\nStory: {d.get('story', '')}\n\nFor each:\n🎬 SCENE [N]\n📍 Setting\n✨ AI PROMPT\n🎵 Mood"
@@ -749,7 +750,7 @@ def story_to_video():
 @app.route("/safety_check", methods=["POST"])
 def safety_check():
     try:
-        d = request.json or {}
+        d = _json_body()
         return jsonify(result=llm(
             "Content safety expert for AI video generation.",
             f"Audience: {d.get('audience', '')}\nPrompt: {d.get('prompt', '')}\n\n🛡️ RATING (Safe/Caution/Unsafe)\n✅ SAFE ELEMENTS\n⚠️ CONCERNS\n🔧 SAFE ALTERNATIVE"
@@ -760,7 +761,7 @@ def safety_check():
 @app.route("/enhance_prompt", methods=["POST"])
 def enhance_prompt():
     try:
-        d = request.json or {}
+        d = _json_body()
         return jsonify(result=llm(
             "Master AI prompt engineer for cinematic safe video. Optimized for CogVideoX-5b.",
             f"Enhance: {d.get('prompt', '')}\nCamera: {d.get('camera', '')} | Lighting: {d.get('lighting', '')}\n\n✨ ENHANCED PROMPT\n📸 TECHNICAL DETAILS\n🎨 COLORS & MOOD\n🚫 NEGATIVE PROMPT"
@@ -771,10 +772,10 @@ def enhance_prompt():
 @app.route("/gen_ideas", methods=["POST"])
 def gen_ideas():
     try:
-        d = request.json or {}
+        d = _json_body()
         return jsonify(result=llm(
-            "Creative education content strategist for family-safe AI video.",
-            f"10 educator-safe video ideas:\nTheme: {d.get('theme', '')} | Platform: {d.get('platform', '')} | Audience: {d.get('audience', '')}\n\nFor each:\n💡 IDEA [N]\n📝 Concept\n🎯 Learning Goal\n✨ AI Prompt\n📈 Why it works in class"
+            "Creative content strategist for family-safe AI video.",
+            f"10 family-safe video ideas:\nTheme: {d.get('theme', '')} | Platform: {d.get('platform', '')} | Audience: {d.get('audience', '')}\n\nFor each:\n💡 IDEA [N]\n📝 Concept\n🎯 Goal\n✨ AI Prompt\n📈 Why it works"
         ))
     except Exception:
         return jsonify(result=f"❌ {traceback.format_exc()}")
@@ -782,7 +783,7 @@ def gen_ideas():
 @app.route("/follow_up", methods=["POST"])
 def follow_up():
     try:
-        d = request.json or {}
+        d = _json_body()
         context = d.get("context", "").strip()
         question = d.get("question", "").strip()
         if not question:
@@ -798,7 +799,7 @@ def follow_up():
 @app.route("/feedback", methods=["POST"])
 def feedback():
     try:
-        d = request.json or {}
+        d = _json_body()
         message = (d.get("message") or "").strip()
         if not message:
             return jsonify(ok=False, error="Please provide feedback message.")
@@ -809,6 +810,12 @@ def feedback():
             "message": message[:2000],
         }
         FEEDBACK_LOG.append(entry)
+        try:
+            import json
+            with open("feedback.log.jsonl", "a", encoding="utf-8") as f:
+                f.write(json.dumps(entry, ensure_ascii=False) + "\n")
+        except Exception:
+            pass
         return jsonify(ok=True, result="✅ Thanks! Your feedback was submitted successfully.")
     except Exception:
         return jsonify(ok=False, error=f"Server error: {traceback.format_exc()}")

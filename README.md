@@ -1,6 +1,6 @@
 # PureVid AI
 
-Educator-ready AI video and teaching-content assistant.
+AI video and creative-content assistant for general users.
 
 ## Environment variables
 
