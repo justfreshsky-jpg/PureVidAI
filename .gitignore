@@ -1,0 +1,62 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+MANIFEST
+
+# Virtual environments
+.env
+.venv
+env/
+venv/
+ENV/
+env.bak/
+venv.bak/
+
+# IDE / editor
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Logs and databases
+*.log
+*.log.jsonl
+*.sqlite
+*.db
+
+# Secrets and credentials
+*.pem
+*.key
+service-account*.json
+credentials*.json
+gcloud-credentials*.json
+
+# Test / coverage artifacts
+.coverage
+.tox/
+.nox/
+.pytest_cache/
+htmlcov/
