@@ -8,6 +8,7 @@ from flask import Flask, request, jsonify, render_template_string
 from groq import Groq
 
 app = Flask(__name__)
+FEEDBACK_LOG = []
 GROQ_KEY = os.environ.get("GROQ_KEY")
 FAL_KEY = os.environ.get("FAL_KEY")
 VERTEX_PROJECT_ID = (
@@ -79,6 +80,10 @@ threading.Thread(target=_bg_refresh, daemon=True).start()
 
 def get_context():
     return _cache["content"] if _cache["content"] else FALLBACK
+
+def _normalized_video_provider():
+    provider = (VIDEO_PROVIDER or "google").strip().lower()
+    return provider if provider in {"google", "fal"} else "google"
 
 # ── LLM ─────────────────────────────────────────────────────
 def _sanitize_text(text):
@@ -255,12 +260,14 @@ hr{border:none;border-top:1px solid #e8eaf0;margin:18px 0}
     </div>
   </div>
   <div class="tabs">
-    <button class="active" onclick="show('generate',this)"><span class="tab-icon">🎬</span>Generate</button>
-    <button onclick="show('prompt',this)"><span class="tab-icon">✨</span>Prompts</button>
-    <button onclick="show('story',this)"><span class="tab-icon">📖</span>Story</button>
-    <button onclick="show('safety',this)"><span class="tab-icon">🛡️</span>Safety</button>
-    <button onclick="show('enhance',this)"><span class="tab-icon">⚡</span>Enhance</button>
-    <button onclick="show('ideas',this)"><span class="tab-icon">💡</span>Ideas</button>
+    <button id="tab-generate" class="active" onclick="show('generate',this)"><span class="tab-icon">🎬</span>Generate</button>
+    <button id="tab-prompt" onclick="show('prompt',this)"><span class="tab-icon">✨</span>Prompts</button>
+    <button id="tab-story" onclick="show('story',this)"><span class="tab-icon">📖</span>Story</button>
+    <button id="tab-safety" onclick="show('safety',this)"><span class="tab-icon">🛡️</span>Safety</button>
+    <button id="tab-enhance" onclick="show('enhance',this)"><span class="tab-icon">⚡</span>Enhance</button>
+    <button id="tab-ideas" onclick="show('ideas',this)"><span class="tab-icon">💡</span>Ideas</button>
+    <button id="tab-followup" onclick="show('followup',this)"><span class="tab-icon">💬</span>Ask More</button>
+    <button id="tab-feedback" onclick="show('feedback',this)"><span class="tab-icon">📝</span>Feedback</button>
   </div>
 
   <!-- GENERATE -->
@@ -398,6 +405,35 @@ hr{border:none;border-top:1px solid #e8eaf0;margin:18px 0}
     <div class="output-wrap"><div id="io" class="output">Ideas will appear here...</div><button class="copy-btn" onclick="cp('io')">📋 Copy</button></div>
   </div></div>
 
+  <!-- FOLLOW-UP -->
+  <div id="followup" class="tab"><div class="card">
+    <h2>💬 Ask Follow-up Questions</h2>
+    <p class="hint">Want to learn more from a result? Paste it below and ask a follow-up question.</p>
+    <hr>
+    <div class="field">
+      <label>Previous AI Response</label>
+      <textarea id="fu1" rows="5" placeholder="Paste the AI output you want to explore further..."></textarea>
+    </div>
+    <div class="field">
+      <label>Your Follow-up Question</label>
+      <input id="fu2" placeholder="e.g. Can you explain this in simpler steps?">
+    </div>
+    <button class="btn" id="fub" onclick="call('/follow_up',{context:g('fu1'),question:g('fu2')},'fuo','fub','💬 Ask Follow-up')">💬 Ask Follow-up</button>
+    <div class="output-wrap"><div id="fuo" class="output">Follow-up answer will appear here...</div><button class="copy-btn" onclick="cp('fuo')">📋 Copy</button></div>
+  </div></div>
+
+  <!-- FEEDBACK -->
+  <div id="feedback" class="tab"><div class="card">
+    <h2>📝 Feedback</h2>
+    <p class="hint">Tell us what works and what should improve. Your feedback helps make PureVid better.</p>
+    <hr>
+    <div class="field"><label>Your Name (optional)</label><input id="fb1" placeholder="Your name"></div>
+    <div class="field"><label>Email (optional)</label><input id="fb2" placeholder="you@example.com"></div>
+    <div class="field"><label>Feedback</label><textarea id="fb3" rows="5" placeholder="Share bugs, ideas, or suggestions..."></textarea></div>
+    <button class="btn" id="fbb" onclick="submitFeedback()">📝 Submit Feedback</button>
+    <div class="output-wrap"><div id="fbo" class="output">Feedback status will appear here...</div></div>
+  </div></div>
+
 </div>
 
 <div class="footer">
@@ -443,6 +479,27 @@ async function call(endpoint,data,outId,btnId,label){
     btn.textContent=label;
   }
 }
+async function submitFeedback(){
+  const out=document.getElementById('fbo');
+  const btn=document.getElementById('fbb');
+  const message=g('fb3').trim();
+  if(!message){out.textContent='❌ Please write feedback before submitting.';return;}
+  btn.disabled=true;
+  btn.innerHTML='<span class="spinner"></span>Sending...';
+  out.textContent='⏳ Submitting feedback...';
+  try{
+    const r=await fetch('/feedback',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({name:g('fb1'),email:g('fb2'),message})});
+    const j=await r.json();
+    out.textContent=j.result || j.error || 'Thanks for your feedback!';
+    if(j.ok){document.getElementById('fb3').value='';}
+  }catch(e){
+    out.textContent='❌ Error: '+e.message;
+  }finally{
+    btn.disabled=false;
+    btn.textContent='📝 Submit Feedback';
+  }
+}
+
 async function generateVideo(){
   const prompt=g('vp'),ratio=g('va');
   const btn=document.getElementById('vbtn');
@@ -463,7 +520,7 @@ async function generateVideo(){
   const steps=[
     '🛡️ Checking safety...',
     '🤖 Enhancing your prompt with AI...',
-    '📡 Connecting to CogVideoX...',
+    '📡 Connecting to video provider...',
     '🎬 Generating video frames... (2–4 min, please wait)',
     '🎞️ Composing final video...',
     '📦 Almost ready...'
@@ -721,6 +778,41 @@ def gen_ideas():
         ))
     except Exception:
         return jsonify(result=f"❌ {traceback.format_exc()}")
+
+@app.route("/follow_up", methods=["POST"])
+def follow_up():
+    try:
+        d = request.json or {}
+        context = d.get("context", "").strip()
+        question = d.get("question", "").strip()
+        if not question:
+            return jsonify(result="❌ Please provide a follow-up question.")
+        return jsonify(result=llm(
+            "Helpful assistant for follow-up explanations. Keep answers clear, practical, and family-safe.",
+            f"Context:\n{context}\n\nFollow-up question:\n{question}\n\nGive a clear answer with simple steps."
+        ))
+    except Exception:
+        return jsonify(result=f"❌ {traceback.format_exc()}")
+
+
+@app.route("/feedback", methods=["POST"])
+def feedback():
+    try:
+        d = request.json or {}
+        message = (d.get("message") or "").strip()
+        if not message:
+            return jsonify(ok=False, error="Please provide feedback message.")
+        entry = {
+            "time": int(time.time()),
+            "name": (d.get("name") or "").strip()[:120],
+            "email": (d.get("email") or "").strip()[:200],
+            "message": message[:2000],
+        }
+        FEEDBACK_LOG.append(entry)
+        return jsonify(ok=True, result="✅ Thanks! Your feedback was submitted successfully.")
+    except Exception:
+        return jsonify(ok=False, error=f"Server error: {traceback.format_exc()}")
+
 
 if __name__ == "__main__":
     print("🚀 PureVid AI starting...")
