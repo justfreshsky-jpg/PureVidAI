@@ -150,6 +150,18 @@ def _groq_llm(full_system, user):
     return _sanitize_text(r.choices[0].message.content)
 
 
+def _is_vertex_config_error(exc):
+    msg = str(exc or "").lower()
+    config_markers = [
+        "project is not configured",
+        "default credentials",
+        "could not automatically determine credentials",
+        "google-auth package is required",
+        "your default credentials were not found",
+    ]
+    return any(marker in msg for marker in config_markers)
+
+
 def llm(system, user):
     assistant_prompt = """
     🌍 GENERAL CREATIVE ASSISTANT
@@ -161,13 +173,23 @@ def llm(system, user):
 
     full_system = system + "\n\n" + assistant_prompt + "\n\nReference data:\n" + get_context()
 
+    vertex_error = None
+
     try:
         return _vertex_llm(full_system, user)
-    except Exception:
-        if client:
-            return _groq_llm(full_system, user)
+    except Exception as exc:
+        vertex_error = exc
 
-    return "❌ Missing AI config. Configure Google Cloud ADC (or set VERTEX_PROJECT_ID) or provide GROQ_KEY."
+    if client:
+        try:
+            return _groq_llm(full_system, user)
+        except Exception as exc:
+            return f"❌ Groq fallback failed after Vertex AI error: {exc}"
+
+    if _is_vertex_config_error(vertex_error):
+        return "❌ Missing AI config. Configure Google Cloud ADC (or set VERTEX_PROJECT_ID) or provide GROQ_KEY."
+
+    return f"❌ Vertex AI request failed: {vertex_error}"
 
 # ── HTML ─────────────────────────────────────────────────────
 HTML = """<!DOCTYPE html>
