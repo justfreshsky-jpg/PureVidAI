@@ -1,14 +1,36 @@
 import os
 os.environ['HTTPX_PROXIES'] = 'null'  # Fix Render/httpx proxies bug
 import re
+import logging
 import traceback, time, threading
+import unicodedata
+import collections
 import requests
 from bs4 import BeautifulSoup
 from flask import Flask, request, jsonify, render_template_string
 from groq import Groq
 
+logger = logging.getLogger(__name__)
+
 app = Flask(__name__)
 FEEDBACK_LOG = []
+FEEDBACK_LOG_MAX = 1000
+FEEDBACK_LOG_LOCK = threading.Lock()
+
+# Simple in-memory rate limiter (per-IP, sliding window)
+_rate_limit = collections.defaultdict(list)
+_RATE_LIMIT_WINDOW = 60  # seconds
+
+def _check_rate_limit(endpoint, limit=10):
+    ip = request.remote_addr or "unknown"
+    key = f"{ip}:{endpoint}"
+    now = time.time()
+    _rate_limit[key] = [t for t in _rate_limit[key] if now - t < _RATE_LIMIT_WINDOW]
+    if len(_rate_limit[key]) >= limit:
+        return False
+    _rate_limit[key].append(now)
+    return True
+
 GROQ_KEY = os.environ.get("GROQ_KEY")
 FAL_KEY = os.environ.get("FAL_KEY")
 VERTEX_PROJECT_ID = (
@@ -77,7 +99,10 @@ def _fetch_tips():
 
 def _bg_refresh():
     while True:
-        _fetch_tips()
+        try:
+            _fetch_tips()
+        except Exception as exc:
+            logger.error("_bg_refresh: unexpected error: %s", exc)
         time.sleep(3600)
 
 threading.Thread(target=_bg_refresh, daemon=True).start()
@@ -96,11 +121,7 @@ def _json_body():
 def _sanitize_text(text):
     text = (text or "").replace('**', '')
     return ''.join(c for c in text
-                   if (ord(c) < 128 or c in 'ğüşıöçĞÜŞİÖÇ' or
-                       0x1F600 <= ord(c) <= 0x1F64F or
-                       0x1F300 <= ord(c) <= 0x1F5FF or
-                       0x1F680 <= ord(c) <= 0x1F6FF or
-                       0x1F900 <= ord(c) <= 0x1F9FF)).strip()
+                   if unicodedata.category(c) not in ('Cc', 'Cs')).strip()
 
 
 def _vertex_llm(full_system, user):
@@ -139,7 +160,7 @@ def _vertex_llm(full_system, user):
 
 def _groq_llm(full_system, user):
     if not client:
-        return None
+        raise RuntimeError("Groq client is not configured. Provide GROQ_KEY.")
 
     r = client.chat.completions.create(
         model="llama-3.3-70b-versatile",
@@ -482,15 +503,28 @@ function show(tab,btn){
   document.getElementById(tab).classList.add('active');
   btn.classList.add('active');
 }
+function _fallbackCopy(text,btn){
+  const ta=document.createElement('textarea');
+  ta.value=text;ta.style.position='fixed';ta.style.opacity='0';
+  document.body.appendChild(ta);ta.focus();ta.select();
+  try{const ok=document.execCommand('copy');btn.textContent=ok?'✅ Copied!':'❌ Copy failed';}
+  catch(e){btn.textContent='❌ Copy failed';}
+  document.body.removeChild(ta);
+  setTimeout(()=>btn.textContent='📋 Copy',2000);
+}
 function cp(id){
-  navigator.clipboard.writeText(document.getElementById(id).innerText).then(()=>{
-    const btn=document.getElementById(id).closest('.output-wrap').querySelector('.copy-btn');
-    btn.textContent='✅ Copied!';
-    setTimeout(()=>btn.textContent='📋 Copy',2000);
-  });
+  const text=document.getElementById(id).innerText;
+  const btn=document.getElementById(id).closest('.output-wrap').querySelector('.copy-btn');
+  if(navigator.clipboard&&navigator.clipboard.writeText){
+    navigator.clipboard.writeText(text).then(()=>{
+      btn.textContent='✅ Copied!';
+      setTimeout(()=>btn.textContent='📋 Copy',2000);
+    }).catch(()=>_fallbackCopy(text,btn));
+  }else{_fallbackCopy(text,btn);}
 }
 async function call(endpoint,data,outId,btnId,label){
   const out=document.getElementById(outId),btn=document.getElementById(btnId);
+  out.textContent='';
   btn.disabled=true;
   btn.innerHTML='<span class="spinner"></span>Generating...';
   out.textContent='⏳ AI is thinking...';
@@ -510,6 +544,7 @@ async function submitFeedback(){
   const out=document.getElementById('fbo');
   const btn=document.getElementById('fbb');
   const message=g('fb3').trim();
+  out.textContent='';
   if(!message){out.textContent='❌ Please write feedback before submitting.';return;}
   btn.disabled=true;
   btn.innerHTML='<span class="spinner"></span>Sending...';
@@ -535,13 +570,13 @@ async function generateVideo(){
   const prog=document.getElementById('prog');
   const bar=document.getElementById('progbar');
   const vbox=document.getElementById('vbox');
+  out.textContent='';status.textContent='';
   if(!prompt.trim()){out.textContent='❌ Please describe your video first!';return;}
   btn.disabled=true;
   btn.innerHTML='<span class="spinner"></span>Generating...';
   vbox.style.display='none';
   prog.style.display='block';
   bar.style.width='5%';
-  out.textContent='';
   let pct=5;
   const ticker=setInterval(()=>{pct=Math.min(pct+1,90);bar.style.width=pct+'%';},3000);
   const steps=[
@@ -555,12 +590,16 @@ async function generateVideo(){
   let si=0;
   status.textContent=steps[si++];
   const stepTick=setInterval(()=>{if(si<steps.length)status.textContent=steps[si++];},50000);
+  const ctrl=new AbortController();
+  const timeoutId=setTimeout(()=>ctrl.abort(),720000);
   try{
     const r=await fetch('/generate_video',{
       method:'POST',
       headers:{'Content-Type':'application/json'},
-      body:JSON.stringify({prompt,ratio})
+      body:JSON.stringify({prompt,ratio}),
+      signal:ctrl.signal
     });
+    clearTimeout(timeoutId);
     const j=await r.json();
     clearInterval(ticker);clearInterval(stepTick);
     bar.style.width='100%';
@@ -572,12 +611,33 @@ async function generateVideo(){
       out.textContent='✅ Generated | Prompt: '+j.prompt_used;
       const src=j.video_b64?'data:video/mp4;base64,'+j.video_b64:j.video_url;
       document.getElementById('vplayer').src=src;
-      document.getElementById('vdownload').href=src;
+      const dlBtn=document.getElementById('vdownload');
+      if(src.startsWith('data:')){
+        dlBtn.href=src;
+        dlBtn.onclick=null;
+      }else{
+        dlBtn.href='#';
+        dlBtn.onclick=async function(e){
+          e.preventDefault();
+          try{
+            const resp=await fetch(src);
+            const blob=await resp.blob();
+            const url=URL.createObjectURL(blob);
+            const a=document.createElement('a');a.href=url;a.download='purevid.mp4';a.click();
+            setTimeout(()=>URL.revokeObjectURL(url),60000);
+          }catch(err){window.open(src,'_blank');}
+        };
+      }
       vbox.style.display='block';
     }
   }catch(e){
+    clearTimeout(timeoutId);
     clearInterval(ticker);clearInterval(stepTick);
-    out.textContent='❌ Error: '+e.message;
+    if(e.name==='AbortError'){
+      out.textContent='❌ Request timed out after 12 minutes. Please try again.';
+    }else{
+      out.textContent='❌ Error: '+e.message;
+    }
     status.textContent='';
   }finally{
     btn.disabled=false;
@@ -632,7 +692,12 @@ def _vertex_generate_video(prompt, ratio):
     if not operation_name:
         raise RuntimeError("Google video operation name was not returned.")
 
-    for _ in range(60):
+    for i in range(60):
+        if i % 5 == 0:
+            try:
+                token, _ = _get_google_auth_context()
+            except Exception as exc:
+                logger.warning("_vertex_generate_video: token refresh failed: %s", exc)
         time.sleep(10)
         poll = requests.get(
             f"https://{VERTEX_LOCATION}-aiplatform.googleapis.com/v1/{operation_name}",
@@ -668,17 +733,22 @@ def generate_video():
         ratio = d.get("ratio", "16:9")
 
         if not raw_prompt:
-            return jsonify(error="Please enter a prompt.")
+            return jsonify(error="Please enter a prompt."), 400
         if not is_safe(raw_prompt):
-            return jsonify(error="🚫 Unsafe content detected. Please use family-friendly descriptions.")
+            return jsonify(error="🚫 Unsafe content detected. Please use family-friendly descriptions."), 400
+
+        if not _check_rate_limit("generate_video", limit=5):
+            return jsonify(error="⏳ Too many requests. Please wait a moment and try again."), 429
 
         final_prompt = raw_prompt
         if client or VIDEO_PROVIDER == "google":
             try:
-                final_prompt = llm(
+                enhanced = llm(
                     "Expert prompt enhancer for safe AI video generation. CogVideoX works best with detailed cinematic scene descriptions.",
                     f"Enhance this for cinematic family-safe video:\n\n{raw_prompt}\n\nAspect ratio: {ratio}\n\nKeep it safe, detailed, and under 200 words."
                 )
+                if enhanced and not enhanced.startswith("❌"):
+                    final_prompt = enhanced
             except Exception:
                 final_prompt = raw_prompt
 
@@ -689,12 +759,12 @@ def generate_video():
                 return jsonify(prompt_used=final_prompt, video_url=video_url, video_b64=None, provider="google")
             except Exception as ge:
                 if not (ALLOW_FAL_FALLBACK and FAL_KEY):
-                    return jsonify(error=f"Google Cloud video generation is not ready: {str(ge)[:300]}")
+                    return jsonify(error=f"Google Cloud video generation is not ready: {str(ge)[:300]}"), 503
                 provider = "fal"
 
         if provider == "fal":
             if not FAL_KEY:
-                return jsonify(error="❌ FAL_KEY missing. Set VIDEO_PROVIDER=google to use Google Cloud only, or provide FAL_KEY for fal provider.")
+                return jsonify(error="❌ FAL_KEY missing. Set VIDEO_PROVIDER=google to use Google Cloud only, or provide FAL_KEY for fal provider."), 400
 
             sizes = {
                 "16:9": {"width": 1360, "height": 768},
@@ -715,11 +785,11 @@ def generate_video():
             )
 
             if submit.status_code not in [200, 201]:
-                return jsonify(error=f"Submission failed: {submit.text[:300]}")
+                return jsonify(error=f"Submission failed: {submit.text[:300]}"), 502
 
             request_id = submit.json().get("request_id")
             if not request_id:
-                return jsonify(error="No request ID returned from fal.ai.")
+                return jsonify(error="No request ID returned from fal.ai."), 502
 
             for _ in range(60):
                 time.sleep(10)
@@ -737,19 +807,20 @@ def generate_video():
                     ).json()
                     video_url = final.get("video", {}).get("url")
                     if not video_url:
-                        return jsonify(error="Video URL not found in response.")
+                        return jsonify(error="Video URL not found in response."), 502
                     return jsonify(prompt_used=final_prompt, video_url=video_url, video_b64=None, provider="fal")
                 elif status == "FAILED":
-                    return jsonify(error="Generation failed on fal.ai. Please try again.")
+                    return jsonify(error="Generation failed on fal.ai. Please try again."), 502
 
-            return jsonify(error="Timed out after 10 minutes. Try a simpler prompt.")
+            return jsonify(error="Timed out after 10 minutes. Try a simpler prompt."), 504
 
-        return jsonify(error="Video provider configuration is invalid. Use 'google' or 'fal'.")
+        return jsonify(error="Video provider configuration is invalid. Use 'google' or 'fal'."), 400
 
     except requests.exceptions.Timeout:
-        return jsonify(error="Request timed out. Please try again.")
+        return jsonify(error="Request timed out. Please try again."), 504
     except Exception:
-        return jsonify(error=f"Server error: {traceback.format_exc()}")
+        logger.exception("generate_video: unexpected error")
+        return jsonify(error="❌ Something went wrong. Please try again."), 500
 
 @app.route("/gen_prompt", methods=["POST"])
 def gen_prompt():
@@ -760,8 +831,8 @@ def gen_prompt():
             f"Write a polished AI video prompt. Idea: {d.get('idea', '')}\nStyle: {d.get('style', '')} | Mood: {d.get('mood', '')} | Duration: {d.get('duration', '')}\n\nInclude: style options, shot suggestions, and practical tips.\n\n✨ MAIN PROMPT\n🎨 STYLE TAGS\n🎯 CREATIVE GOAL\n🧩 PRACTICAL USE\n🚫 NEGATIVE PROMPT\n💡 PRO TIP"
         ))
     except Exception:
-        return jsonify(result=f"❌ {traceback.format_exc()}")
-
+        logger.exception("gen_prompt: unexpected error")
+        return jsonify(result="❌ Something went wrong. Please try again."), 500
 @app.route("/story_to_video", methods=["POST"])
 def story_to_video():
     try:
@@ -771,7 +842,8 @@ def story_to_video():
             f"Break into {d.get('scenes', '')} scenes. Style: {d.get('style', '')}\nStory: {d.get('story', '')}\n\nFor each:\n🎬 SCENE [N]\n📍 Setting\n✨ AI PROMPT\n🎵 Mood"
         ))
     except Exception:
-        return jsonify(result=f"❌ {traceback.format_exc()}")
+        logger.exception("story_to_video: unexpected error")
+        return jsonify(result="❌ Something went wrong. Please try again."), 500
 
 @app.route("/safety_check", methods=["POST"])
 def safety_check():
@@ -782,7 +854,8 @@ def safety_check():
             f"Audience: {d.get('audience', '')}\nPrompt: {d.get('prompt', '')}\n\n🛡️ RATING (Safe/Caution/Unsafe)\n✅ SAFE ELEMENTS\n⚠️ CONCERNS\n🔧 SAFE ALTERNATIVE"
         ))
     except Exception:
-        return jsonify(result=f"❌ {traceback.format_exc()}")
+        logger.exception("safety_check: unexpected error")
+        return jsonify(result="❌ Something went wrong. Please try again."), 500
 
 @app.route("/enhance_prompt", methods=["POST"])
 def enhance_prompt():
@@ -793,7 +866,8 @@ def enhance_prompt():
             f"Enhance: {d.get('prompt', '')}\nCamera: {d.get('camera', '')} | Lighting: {d.get('lighting', '')}\n\n✨ ENHANCED PROMPT\n📸 TECHNICAL DETAILS\n🎨 COLORS & MOOD\n🚫 NEGATIVE PROMPT"
         ))
     except Exception:
-        return jsonify(result=f"❌ {traceback.format_exc()}")
+        logger.exception("enhance_prompt: unexpected error")
+        return jsonify(result="❌ Something went wrong. Please try again."), 500
 
 @app.route("/gen_ideas", methods=["POST"])
 def gen_ideas():
@@ -804,7 +878,8 @@ def gen_ideas():
             f"10 family-safe video ideas:\nTheme: {d.get('theme', '')} | Platform: {d.get('platform', '')} | Audience: {d.get('audience', '')}\n\nFor each:\n💡 IDEA [N]\n📝 Concept\n🎯 Goal\n✨ AI Prompt\n📈 Why it works"
         ))
     except Exception:
-        return jsonify(result=f"❌ {traceback.format_exc()}")
+        logger.exception("gen_ideas: unexpected error")
+        return jsonify(result="❌ Something went wrong. Please try again."), 500
 
 @app.route("/follow_up", methods=["POST"])
 def follow_up():
@@ -819,23 +894,29 @@ def follow_up():
             f"Context:\n{context}\n\nFollow-up question:\n{question}\n\nGive a clear answer with simple steps."
         ))
     except Exception:
-        return jsonify(result=f"❌ {traceback.format_exc()}")
+        logger.exception("follow_up: unexpected error")
+        return jsonify(result="❌ Something went wrong. Please try again."), 500
 
 
 @app.route("/feedback", methods=["POST"])
 def feedback():
     try:
+        if not _check_rate_limit("feedback", limit=10):
+            return jsonify(ok=False, error="⏳ Too many requests. Please wait a moment and try again."), 429
         d = _json_body()
         message = (d.get("message") or "").strip()
         if not message:
-            return jsonify(ok=False, error="Please provide feedback message.")
+            return jsonify(ok=False, error="Please provide feedback message."), 400
         entry = {
             "time": int(time.time()),
             "name": (d.get("name") or "").strip()[:120],
             "email": (d.get("email") or "").strip()[:200],
             "message": message[:2000],
         }
-        FEEDBACK_LOG.append(entry)
+        with FEEDBACK_LOG_LOCK:
+            FEEDBACK_LOG.append(entry)
+            if len(FEEDBACK_LOG) > FEEDBACK_LOG_MAX:
+                del FEEDBACK_LOG[:-FEEDBACK_LOG_MAX]
         try:
             import json
             with open(FEEDBACK_LOG_PATH, "a", encoding="utf-8") as f:
@@ -844,15 +925,22 @@ def feedback():
             pass
         return jsonify(ok=True, result="✅ Thanks! Your feedback was submitted successfully.")
     except Exception:
-        return jsonify(ok=False, error=f"Server error: {traceback.format_exc()}")
+        logger.exception("feedback: unexpected error")
+        return jsonify(ok=False, error="❌ Something went wrong. Please try again."), 500
+
+
+@app.route("/health")
+def health():
+    return jsonify(status="ok")
 
 
 if __name__ == "__main__":
-    print("🚀 PureVid AI starting...")
-    print(f"✅ Vertex AI text: {'Ready' if VERTEX_PROJECT_ID else 'Not configured'}")
-    print(f"✅ Video provider: {_normalized_video_provider()}")
-    print(f"✅ Google video model: {VERTEX_VIDEO_MODEL if VIDEO_PROVIDER == 'google' else 'n/a'}")
-    print(f"✅ fal fallback enabled: {ALLOW_FAL_FALLBACK}")
-    print(f"✅ Groq fallback: {'Ready' if client else '❌ Missing GROQ_KEY'}")
-    print(f"✅ fal provider key: {'Ready' if FAL_KEY else 'Not configured'}")
-    app.run(host="0.0.0.0", port=int(os.environ.get('PORT', 5000)), debug=False)
+    logging.basicConfig(level=logging.INFO)
+    logger.info("🚀 PureVid AI starting...")
+    logger.info("✅ Vertex AI text: %s", 'Ready' if VERTEX_PROJECT_ID else 'Not configured')
+    logger.info("✅ Video provider: %s", _normalized_video_provider())
+    logger.info("✅ Google video model: %s", VERTEX_VIDEO_MODEL if VIDEO_PROVIDER == 'google' else 'n/a')
+    logger.info("✅ fal fallback enabled: %s", ALLOW_FAL_FALLBACK)
+    logger.info("✅ Groq fallback: %s", 'Ready' if client else '❌ Missing GROQ_KEY')
+    logger.info("✅ fal provider key: %s", 'Ready' if FAL_KEY else 'Not configured')
+    app.run(host="0.0.0.0", port=int(os.environ.get('PORT', 8080)), debug=False)
