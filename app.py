@@ -2,65 +2,19 @@ import os
 os.environ['HTTPX_PROXIES'] = 'null'  # Fix Render/httpx proxies bug
 import re
 import logging
-import traceback, time, threading
+import time
+import threading
 import unicodedata
 import collections
 import hashlib
 import requests
-from bs4 import BeautifulSoup
 from flask import Flask, request, jsonify, render_template_string
 from groq import Groq
 
+logging.basicConfig(level=logging.INFO, format='%(asctime)s %(levelname)s %(name)s: %(message)s')
 logger = logging.getLogger(__name__)
 
-app = Flask(__name__)
-FEEDBACK_LOG = []
-FEEDBACK_LOG_MAX = 1000
-FEEDBACK_LOG_LOCK = threading.Lock()
-
-# Simple in-memory rate limiter (per-IP, sliding window) — kept for video route
-_rate_limit = collections.defaultdict(list)
-_RATE_LIMIT_WINDOW = 60  # seconds
-
-def _check_rate_limit(endpoint, limit=10):
-    ip = request.remote_addr or "unknown"
-    key = f"{ip}:{endpoint}"
-    now = time.time()
-    _rate_limit[key] = [t for t in _rate_limit[key] if now - t < _RATE_LIMIT_WINDOW]
-    if len(_rate_limit[key]) >= limit:
-        return False
-    _rate_limit[key].append(now)
-    return True
-
-# Global rate limiter applied to all POST requests via before_request hook
-_RATE_LIMIT = 20
-_RATE_WINDOW = 60
-_rate_data: dict = {}
-_rate_lock = threading.Lock()
-
-def _check_global_rate_limit():
-    ip = (request.access_route[0] if request.access_route else request.remote_addr) or '0.0.0.0'
-    now = time.time()
-    with _rate_lock:
-        if ip not in _rate_data:
-            _rate_data[ip] = collections.deque()
-        dq = _rate_data[ip]
-        while dq and dq[0] < now - _RATE_WINDOW:
-            dq.popleft()
-        if len(dq) >= _RATE_LIMIT:
-            return False
-        dq.append(now)
-        stale = [k for k, v in _rate_data.items() if not v]
-        for k in stale:
-            del _rate_data[k]
-    return True
-
-@app.before_request
-def enforce_rate_limit():
-    if request.method == 'POST':
-        if not _check_global_rate_limit():
-            return jsonify(error="Rate limit exceeded. Please wait a minute before making another request."), 429
-
+# ── CONFIG ───────────────────────────────────────────────────
 GROQ_KEY = os.environ.get("GROQ_KEY")
 FAL_KEY = os.environ.get("FAL_KEY")
 VERTEX_PROJECT_ID = (
@@ -77,15 +31,89 @@ ALLOW_FAL_FALLBACK = os.environ.get("ALLOW_FAL_FALLBACK", "false").lower() == "t
 FEEDBACK_LOG_PATH = os.environ.get("FEEDBACK_LOG_PATH", "/tmp/purevid_feedback.log.jsonl")
 client = Groq(api_key=GROQ_KEY) if GROQ_KEY else None
 
+app = Flask(__name__)
+FEEDBACK_LOG = []
+FEEDBACK_LOG_MAX = 1000
+FEEDBACK_LOG_LOCK = threading.Lock()
+
+# ── GLOBAL RATE LIMITER (all POST requests) ──────────────────
+_RATE_LIMIT = 20
+_RATE_WINDOW = 60
+_rate_data: dict = {}
+_rate_lock = threading.Lock()
+_rate_request_count = 0
+
+def _check_global_rate_limit():
+    global _rate_request_count
+    ip = (request.access_route[0] if request.access_route else request.remote_addr) or '0.0.0.0'
+    now = time.time()
+    with _rate_lock:
+        _rate_request_count += 1
+        if ip not in _rate_data:
+            _rate_data[ip] = collections.deque()
+        dq = _rate_data[ip]
+        while dq and dq[0] < now - _RATE_WINDOW:
+            dq.popleft()
+        if len(dq) >= _RATE_LIMIT:
+            return False
+        dq.append(now)
+        # Clean up empty keys every 100 requests to avoid unbounded growth
+        if _rate_request_count % 100 == 0:
+            stale = [k for k, v in _rate_data.items() if not v]
+            for k in stale:
+                del _rate_data[k]
+    return True
+
+@app.before_request
+def enforce_rate_limit():
+    if request.method == 'POST':
+        if not _check_global_rate_limit():
+            return jsonify(error="Rate limit exceeded. Please wait a minute before making another request."), 429
+
+# ── VIDEO-SPECIFIC RATE LIMITER (5/min per IP) ───────────────
+_VIDEO_RATE_LIMIT = 5
+_VIDEO_RATE_WINDOW = 60
+_video_rate_data: dict = {}
+_video_rate_lock = threading.Lock()
+
+def _check_video_rate_limit():
+    ip = (request.access_route[0] if request.access_route else request.remote_addr) or '0.0.0.0'
+    now = time.time()
+    with _video_rate_lock:
+        if ip not in _video_rate_data:
+            _video_rate_data[ip] = collections.deque()
+        dq = _video_rate_data[ip]
+        while dq and dq[0] < now - _VIDEO_RATE_WINDOW:
+            dq.popleft()
+        if len(dq) >= _VIDEO_RATE_LIMIT:
+            return False
+        dq.append(now)
+    return True
+
+@app.after_request
+def add_security_headers(response):
+    response.headers['X-Content-Type-Options'] = 'nosniff'
+    response.headers['X-Frame-Options'] = 'DENY'
+    response.headers['X-XSS-Protection'] = '1; mode=block'
+    response.headers['Referrer-Policy'] = 'strict-origin-when-cross-origin'
+    response.headers['Content-Security-Policy'] = (
+        "default-src 'self'; "
+        "script-src 'self' 'unsafe-inline'; "
+        "style-src 'self' 'unsafe-inline' https://cdnjs.cloudflare.com; "
+        "font-src 'self' https://cdnjs.cloudflare.com; "
+        "img-src 'self' data:; "
+        "media-src 'self' blob: data: https://storage.googleapis.com https://queue.fal.run; "
+        "connect-src 'self'"
+    )
+    return response
+
 UNSAFE = ["nudity","naked","violence","blood","kill","alcohol","drugs","gambling","weapon","gore","nsfw","sexy","adult","explicit","hate","terrorist"]
 UNSAFE_PATTERN = re.compile(r"\b(?:" + "|".join(re.escape(w) for w in UNSAFE) + r")\b", re.IGNORECASE)
 
 def is_safe(prompt):
     return not bool(UNSAFE_PATTERN.search(prompt or ""))
 
-# ── BACKGROUND SCRAPER ──────────────────────────────────────
-_cache = {"content": "", "last": 0}
-
+# ── STATIC CONTEXT ──────────────────────────────────────────
 FALLBACK = """
 [VIDEO TIPS] CogVideoX works best with detailed cinematic descriptions. Include: lighting, camera angle, motion, mood.
 [PROMPTS] Good structure: [Subject] + [Action] + [Setting] + [Lighting] + [Camera] + [Style]
@@ -97,48 +125,8 @@ FALLBACK = """
 [ENHANCE] Add: "cinematic lighting, photorealistic, 8K, shallow depth of field, professional grade".
 """
 
-def _fetch_tips():
-    try:
-        headers = {
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/120 Safari/537.36",
-            "Referer": "https://www.google.com/"
-        }
-        sources = [
-            "https://fal.ai/models/fal-ai/cogvideox-5b",
-            "https://huggingface.co/THUDM/CogVideoX-5b"
-        ]
-        combined = ""
-        for url in sources:
-            try:
-                r = requests.get(url, headers=headers, timeout=6)
-                r.raise_for_status()
-                soup = BeautifulSoup(r.text, "html.parser")
-                for tag in soup(["script","style","nav","header","footer"]):
-                    tag.decompose()
-                text = soup.get_text(separator=" ", strip=True)
-                combined += text[:1500] + "\n---\n"
-            except requests.exceptions.RequestException as exc:
-                logger.warning("_fetch_tips: failed to fetch %s: %s", url, exc)
-            except Exception as exc:
-                logger.warning("_fetch_tips: unexpected error for %s: %s", url, exc)
-        if combined.strip():
-            _cache["content"] = combined[:5000]
-            _cache["last"] = time.time()
-    except Exception as exc:
-        logger.error("_fetch_tips: unexpected error: %s", exc)
-
-def _bg_refresh():
-    while True:
-        try:
-            _fetch_tips()
-        except Exception as exc:
-            logger.error("_bg_refresh: unexpected error: %s", exc)
-        time.sleep(3600)
-
-threading.Thread(target=_bg_refresh, daemon=True).start()
-
 def get_context():
-    return _cache["content"] if _cache["content"] else FALLBACK
+    return FALLBACK
 
 def _normalized_video_provider():
     provider = (VIDEO_PROVIDER or "google").strip().lower()
@@ -169,9 +157,8 @@ def _sanitize_text(text):
     return ''.join(c for c in text
                    if unicodedata.category(c) not in ('Cc', 'Cs')).strip()
 
-# Response cache
-_resp_cache: dict = {}
-_resp_cache_order: list = []
+# Response cache (OrderedDict for O(1) LRU eviction)
+_resp_cache: collections.OrderedDict = collections.OrderedDict()
 _CACHE_MAX = 500
 _CACHE_TTL = 3600
 _resp_cache_lock = threading.Lock()
@@ -181,19 +168,18 @@ def _cache_get(key):
         if key in _resp_cache:
             val, ts = _resp_cache[key]
             if time.time() - ts < _CACHE_TTL:
+                _resp_cache.move_to_end(key)
                 return val
             del _resp_cache[key]
-            try: _resp_cache_order.remove(key)
-            except ValueError: pass  # key may already be absent from order list
     return None
 
 def _cache_set(key, val):
     with _resp_cache_lock:
-        if len(_resp_cache) >= _CACHE_MAX and _resp_cache_order:
-            oldest = _resp_cache_order.pop(0)
-            _resp_cache.pop(oldest, None)
+        if key in _resp_cache:
+            _resp_cache.move_to_end(key)
+        elif len(_resp_cache) >= _CACHE_MAX:
+            _resp_cache.popitem(last=False)
         _resp_cache[key] = (val, time.time())
-        _resp_cache_order.append(key)
 
 
 def _vertex_llm(full_system, user):
@@ -400,7 +386,7 @@ def llm(system, user):
 
     full_system = system + "\n\n" + assistant_prompt + "\n\nReference data:\n" + get_context()
 
-    cache_key = hashlib.md5((full_system + user).encode()).hexdigest()
+    cache_key = hashlib.md5((system + user).encode()).hexdigest()
     cached = _cache_get(cache_key)
     if cached is not None:
         return cached
@@ -487,7 +473,7 @@ hr{border:none;border-top:1px solid #e8eaf0;margin:18px 0}
 </head>
 <body>
 <div class="header">
-  <h1>🎥 PureVid AI</h1>
+  <h1 style="cursor:pointer" onclick="window.location.reload()">🎥 PureVid AI</h1>
   <p><b>Beautiful, family-safe AI videos and creative content for everyone</b></p>
   <div class="topnav">
     <button class="nav-pill" type="button" onclick="switchTab('generate')">Start</button><button class="nav-pill" type="button" onclick="switchTab('prompt')">Prompts</button><button class="nav-pill" type="button" onclick="switchTab('story')">Story</button><button class="nav-pill" type="button" onclick="switchTab('safety')">Safety</button><button class="nav-pill" type="button" onclick="switchTab('enhance')">Enhance</button><button class="nav-pill" type="button" onclick="switchTab('ideas')">Ideas</button><button class="nav-pill" type="button" onclick="switchTab('followup')">Ask More</button><button class="nav-pill" type="button" onclick="switchTab('feedback')">Feedback</button>
@@ -523,7 +509,7 @@ hr{border:none;border-top:1px solid #e8eaf0;margin:18px 0}
   <!-- GENERATE -->
   <div id="generate" class="tab active"><div class="card">
     <h2>🎬 Generate a Video</h2>
-    <p class="hint">Describe your idea (subject, scene, mood). PureVid AI creates a family-safe video with CogVideoX. Takes 2–4 minutes.</p>
+    <p class="hint">Describe your idea (subject, scene, mood). PureVid AI creates a family-safe video with CogVideoX. This may take up to 10 minutes.</p>
     <hr>
     <div class="field">
       <label>What do you want in your video?</label>
@@ -702,9 +688,10 @@ function setExample(text){document.getElementById('vp').value=text;document.getE
 function switchTab(tab){const b=document.getElementById('tab-'+tab);if(b)show(tab,b);}
 function show(tab,btn){
   document.querySelectorAll('.tab').forEach(t=>t.classList.remove('active'));
-  document.querySelectorAll('.tabs button').forEach(b=>b.classList.remove('active'));
+  document.querySelectorAll('.tabs button').forEach(b=>{b.classList.remove('active');b.setAttribute('aria-selected','false');});
   document.getElementById(tab).classList.add('active');
   btn.classList.add('active');
+  btn.setAttribute('aria-selected','true');
 }
 function _fallbackCopy(text,btn){
   const ta=document.createElement('textarea');
@@ -786,7 +773,7 @@ async function generateVideo(){
     '🛡️ Checking safety...',
     '🤖 Enhancing your prompt with AI...',
     '📡 Connecting to video provider...',
-    '🎬 Generating video frames... (2–4 min, please wait)',
+    '🎬 Generating video frames... This may take up to 10 minutes, please wait',
     '🎞️ Composing final video...',
     '📦 Almost ready...'
   ];
@@ -940,7 +927,7 @@ def generate_video():
         if not is_safe(raw_prompt):
             return jsonify(error="🚫 Unsafe content detected. Please use family-friendly descriptions."), 400
 
-        if not _check_rate_limit("generate_video", limit=5):
+        if not _check_video_rate_limit():
             return jsonify(error="⏳ Too many requests. Please wait a moment and try again."), 429
 
         final_prompt = raw_prompt
@@ -1136,12 +1123,16 @@ def health():
 
 
 if __name__ == "__main__":
-    logging.basicConfig(level=logging.INFO)
     logger.info("🚀 PureVid AI starting...")
-    logger.info("✅ Vertex AI text: %s", 'Ready' if VERTEX_PROJECT_ID else 'Not configured')
+    logger.info("Groq: %s", 'configured' if GROQ_KEY else 'not configured')
+    logger.info("Cerebras: %s", 'configured' if os.environ.get('CEREBRAS_KEY') else 'not configured')
+    logger.info("Gemini: %s", 'configured' if os.environ.get('GEMINI_KEY') else 'not configured')
+    logger.info("Cohere: %s", 'configured' if os.environ.get('COHERE_KEY') else 'not configured')
+    logger.info("Mistral: %s", 'configured' if os.environ.get('MISTRAL_KEY') else 'not configured')
+    logger.info("OpenRouter: %s", 'configured' if os.environ.get('OPENROUTER_KEY') else 'not configured')
+    logger.info("HuggingFace: %s", 'configured' if os.environ.get('HF_KEY') else 'not configured')
     logger.info("✅ Video provider: %s", _normalized_video_provider())
     logger.info("✅ Google video model: %s", VERTEX_VIDEO_MODEL if VIDEO_PROVIDER == 'google' else 'n/a')
     logger.info("✅ fal fallback enabled: %s", ALLOW_FAL_FALLBACK)
-    logger.info("✅ Groq fallback: %s", 'Ready' if client else '❌ Missing GROQ_KEY')
     logger.info("✅ fal provider key: %s", 'Ready' if FAL_KEY else 'Not configured')
     app.run(host="0.0.0.0", port=int(os.environ.get('PORT', 8080)), debug=False)
