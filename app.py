@@ -408,7 +408,7 @@ HTML = """<!DOCTYPE html>
 <title>🎥 PureVid AI</title>
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <meta name="description" content="AI video and prompt generator for general users. Family-safe and easy to use.">
-<link rel="icon" type="image/svg+xml" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'%3E%3Ctext y='.9em' font-size='90'%3EF0%9F%93%B9%3C/text%3E%3C/svg%3E">
+<link rel="icon" type="image/svg+xml" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'%3E%3Ctext y='.9em' font-size='90'%3E%F0%9F%93%B9%3C/text%3E%3C/svg%3E">
 <style>
 :root{--bd:#1a2e4a;--bm:#2563eb;--bl:#60a5fa;--pale:#f0f4ff;--border:#bfdbfe;--w:#fff;--gray:#666;--r:12px}
 *{box-sizing:border-box;margin:0;padding:0}
