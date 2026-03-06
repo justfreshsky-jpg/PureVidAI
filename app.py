@@ -598,6 +598,7 @@ _HTML = """<!DOCTYPE html>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>PureImage AI</title>
+<link rel="icon" href="data:image/svg+xml,<svg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 100 100%22><text y=%22.9em%22 font-size=%2290%22>&#127912;</text></svg>">
 <style>
   *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
   :root {
@@ -743,7 +744,7 @@ _HTML = """<!DOCTYPE html>
 </head>
 <body>
 <header>
-  <h1>&#127912; PureImage AI</h1>
+  <h1>PureImage AI</h1>
   <p>Create stunning images with AI &mdash; Family Safe &#10003;</p>
   <div style="display:flex;gap:.6rem;justify-content:center;flex-wrap:wrap;margin-top:.8rem;">
     <span style="background:rgba(255,255,255,.15);border-radius:20px;padding:.25rem .75rem;font-size:.8rem;">&#10024; AI Powered</span>
@@ -806,7 +807,7 @@ _HTML = """<!DOCTYPE html>
       </div>
     </div>
 
-    <button class="btn-primary" id="gen-btn" onclick="generateImages()">&#127912; Generate Images</button>
+    <button class="btn-primary" id="gen-btn" onclick="generateImages()">Generate Images</button>
   </div>
 
   <div id="status-bar"><span class="spinner"></span><span id="status-text">Generating...</span></div>
@@ -815,7 +816,7 @@ _HTML = """<!DOCTYPE html>
 </main>
 
 <footer style="text-align:center;padding:1.5rem 1rem;color:var(--muted);font-size:.85rem;border-top:1px solid var(--border);margin-top:2rem;">
-  &#127912; PureImage AI &nbsp;|&nbsp; &#10003; Family Safe AI Image Generation &nbsp;|&nbsp; &#9888;&#65039; AI-generated images may not always be perfect. Review before use.
+  PureImage AI &nbsp;|&nbsp; &#10003; Family Safe AI Image Generation &nbsp;|&nbsp; &#9888;&#65039; AI-generated images may not always be perfect. Review before use.
 </footer>
 
 <script>
