@@ -1,29 +1,64 @@
-# PureVid AI
+# PureImage AI
 
-AI video and creative-content assistant for general users.
+AI-powered image generation web app. Type a text prompt and generate stunning images using multiple AI providers.
 
-## Environment variables
+## Features
 
-### Recommended (Google Cloud Vertex AI)
-- `VERTEX_PROJECT_ID` (or `GOOGLE_CLOUD_PROJECT`, `GCP_PROJECT`, `GCLOUD_PROJECT`)
-- `VERTEX_LOCATION` (optional, default: `us-central1`)
-- `VERTEX_MODEL` (optional, default: `gemini-1.5-flash`)
-- Workload/service account with Vertex AI access (`aiplatform.endpoints.predict` permission). If your ADC includes a project, PureVid can auto-detect it.
+- **Multiple image providers** with automatic fallback chain:
+  1. **fal.ai** — Primary (FLUX Schnell, FLUX Pro, SD3, Recraft v3)
+  2. **Hugging Face** — Secondary (FLUX.1-schnell, SDXL)
+  3. **Stability AI** — Tertiary (SDXL 1.0)
+  4. **Replicate** — Quaternary (FLUX Schnell)
+  5. **Pollinations.ai** — Free fallback, always available (no key needed)
+- **Style presets**: Photorealistic, Artistic, Anime, Digital Art, Oil Painting, Watercolor, Sketch, Cinematic, Abstract
+- **Aspect ratios**: Square (1:1), Landscape (16:9), Portrait (9:16), Wide (3:2), Tall (2:3)
+- **Multiple images**: Generate 1, 2, or 4 images at once
+- **Prompt enhancement**: Optional AI-powered prompt improvement (requires an LLM key)
+- **Negative prompts**: Advanced control over what to exclude
+- **Download buttons** on every generated image
+- **Rate limiting** and **response caching** built in
 
-### Optional fallback
-- `GROQ_KEY` (used when Vertex AI is not configured or as fallback if enabled)
+## Environment Variables
 
-### Video generation (no extra third-party spend by default)
-- `VIDEO_PROVIDER` (optional, default: `google`) → `google` or `fal`
-- `VERTEX_VIDEO_MODEL` (optional, default: `veo-2.0-generate-001`) for Google video generation
-- `ALLOW_FAL_FALLBACK` (optional, default: `false`) set `true` only if you want fallback to fal
-- `FAL_KEY` required only when `VIDEO_PROVIDER=fal` or when fal fallback is enabled
+### Image Providers
+| Variable | Description |
+|---|---|
+| `FAL_KEY` | fal.ai API key (https://fal.ai) |
+| `HF_KEY` | Hugging Face API key (https://huggingface.co) |
+| `STABILITY_KEY` | Stability AI API key (https://stability.ai) |
+| `REPLICATE_KEY` | Replicate API key (https://replicate.com) |
 
-## Run locally
+Pollinations.ai requires no key and is always used as the final fallback.
+
+### Text LLM Keys (for prompt enhancement, optional)
+| Variable | Provider |
+|---|---|
+| `GROQ_KEY` | Groq (Llama 3.3 70B) |
+| `CEREBRAS_KEY` | Cerebras |
+| `GEMINI_KEY` | Google Gemini |
+| `COHERE_KEY` | Cohere |
+| `MISTRAL_KEY` | Mistral |
+| `OPENROUTER_KEY` | OpenRouter |
+
+### App Config
+| Variable | Default | Description |
+|---|---|---|
+| `PORT` | `8080` | HTTP port |
+| `PUREIMAGE_LOG_PATH` | `/tmp/pureimage_feedback.log.jsonl` | Generation log path |
+
+## Run Locally
 
 ```bash
 pip install -r requirements.txt
 python app.py
 ```
 
-Then open `http://localhost:5000`.
+Then open http://localhost:8080.
+
+## Deploy on Render
+
+1. Create a new **Web Service**
+2. Set **Build Command**: `pip install -r requirements.txt`
+3. Set **Start Command**: `gunicorn app:app`
+4. Add environment variables for your API keys
+5. Deploy — Pollinations.ai works with no keys, so images generate immediately
