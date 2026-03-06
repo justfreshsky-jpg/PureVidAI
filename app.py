@@ -118,6 +118,30 @@ def _json_body():
 
 _MAX_FIELD_LEN = 4000
 
+# ── FAMILY-SAFE CONTENT FILTERING ────────────────────────────
+FAMILY_SAFE_SUFFIX = ", family friendly, appropriate for all ages, wholesome"
+SAFETY_NEGATIVE = (
+    "nudity, sexual content, revealing clothing, violence, gore, blood, weapons, "
+    "alcohol, drugs, gambling, immodest clothing, inappropriate content, nsfw, "
+    "adult content, suggestive, provocative, scary, frightening"
+)
+
+_SANITIZE_RULES = [
+    (r'\b(bikini|lingerie|underwear|swimsuit|naked|nude|topless|shirtless)\b', 'person in modest clothing'),
+    (r'\b(blood|gore|violent|violence|murder|kill|killing|dead\s+body)\b', 'dramatic scene'),
+    (r'\b(alcohol|beer|wine|whiskey|drunk)\b', 'beverage'),
+    (r'\b(gambling|casino|poker)\b', 'game'),
+    (r'\b(nsfw|adult|sexual|explicit|erotic|xxx)\b', ''),
+]
+
+
+def _sanitize_prompt(prompt: str) -> str:
+    """Silently sanitize prompts to ensure family-safe content."""
+    result = prompt
+    for pattern, replacement in _SANITIZE_RULES:
+        result = re.sub(pattern, replacement, result, flags=re.IGNORECASE)
+    return result.strip()
+
 
 def _internal_error():
     logger.exception("Unhandled route error")
@@ -314,14 +338,14 @@ def _has_llm_key():
 
 # ── STYLE PROMPT ENHANCEMENT ─────────────────────────────────
 _STYLE_TEMPLATES = {
-    "photorealistic": "photorealistic, ultra detailed, 8k, professional photography, sharp focus, {prompt}",
-    "artistic":       "{prompt}, digital art, trending on artstation, vibrant colors",
-    "anime":          "anime style, {prompt}, studio ghibli, detailed illustration",
-    "digital-art":    "digital art, {prompt}, concept art, highly detailed, trending",
-    "oil-painting":   "oil painting, {prompt}, classical art, rich textures, brush strokes",
-    "watercolor":     "watercolor painting, {prompt}, soft colors, artistic",
-    "sketch":         "pencil sketch, {prompt}, detailed linework, black and white",
-    "cinematic":      "cinematic, {prompt}, movie still, dramatic lighting, 35mm film",
+    "photorealistic": "photorealistic, ultra detailed, 8k, professional photography, sharp focus, modest and family friendly, appropriate for all ages, {prompt}",
+    "artistic":       "{prompt}, digital art, trending on artstation, vibrant colors, family friendly",
+    "anime":          "anime style, {prompt}, studio ghibli inspired, detailed illustration, family friendly",
+    "digital-art":    "digital art, {prompt}, concept art, highly detailed, family friendly",
+    "oil-painting":   "oil painting, {prompt}, classical art, rich textures, family friendly",
+    "watercolor":     "watercolor painting, {prompt}, soft colors, artistic, family friendly",
+    "sketch":         "pencil sketch, {prompt}, detailed linework, clean lines",
+    "cinematic":      "cinematic, {prompt}, movie still, dramatic lighting, family friendly",
     "abstract":       "abstract art, {prompt}, surreal, vibrant colors, geometric",
 }
 
@@ -532,7 +556,7 @@ def _generate_via_replicate(prompt, negative_prompt, width, height, num_images, 
 
 def _generate_via_pollinations(prompt, negative_prompt, width, height, num_images, **kwargs):
     encoded = urllib.parse.quote(prompt)
-    base_url = f"https://image.pollinations.ai/prompt/{encoded}?width={width}&height={height}&nologo=true"
+    base_url = f"https://image.pollinations.ai/prompt/{encoded}?width={width}&height={height}&nologo=true&safe=1"
     urls = []
     for i in range(min(num_images, 4)):
         seed_url = base_url + (f"&seed={i * 1000 + int(time.time()) % 10000}" if i > 0 else "")
@@ -549,33 +573,22 @@ _IMAGE_PROVIDERS = [
     ("pollinations", _generate_via_pollinations),
 ]
 
-_PROVIDER_MAP = {p[0]: p[1] for p in _IMAGE_PROVIDERS}
 
-
-def _generate_images(prompt, negative_prompt, width, height, num_images, provider, fal_model):
-    kwargs = {"fal_model": fal_model}
+def _generate_images(prompt, negative_prompt, width, height, num_images):
+    """Try each provider in order, silently fall back on failure."""
     errors = []
-
-    if provider != "auto":
-        fn = _PROVIDER_MAP.get(provider)
-        if fn is None:
-            raise ValueError(f"Unknown provider: {provider}")
-        try:
-            urls = fn(prompt, negative_prompt, width, height, num_images, **kwargs)
-            return urls, provider
-        except Exception as exc:
-            raise RuntimeError(f"{provider} failed: {exc}") from exc
-
-    # Auto: try in priority order
     for name, fn in _IMAGE_PROVIDERS:
         try:
-            urls = fn(prompt, negative_prompt, width, height, num_images, **kwargs)
-            return urls, name
+            urls = fn(prompt, negative_prompt, width, height, num_images)
+            if urls:
+                logger.info("Images generated via %s", name)
+                return urls, name
         except Exception as exc:
             logger.warning("Image provider %s failed: %s", name, exc)
             errors.append(f"{name}: {exc}")
-
-    raise RuntimeError("All image providers failed. Errors: " + " | ".join(errors))
+            continue
+    logger.error("All image providers failed: %s", " | ".join(errors))
+    return None, None
 
 
 # ── UI HTML ───────────────────────────────────────────────────
@@ -651,9 +664,6 @@ _HTML = """<!DOCTYPE html>
   }
   .advanced-section { display: none; margin-top: 1rem; }
   .advanced-section.open { display: block; }
-
-  .fal-model-row { display: none; margin-top: 1rem; }
-  .fal-model-row.visible { display: block; }
 
   button {
     cursor: pointer; border: none; border-radius: 8px;
@@ -734,7 +744,13 @@ _HTML = """<!DOCTYPE html>
 <body>
 <header>
   <h1>&#127912; PureImage AI</h1>
-  <p>Generate stunning images with AI</p>
+  <p>Create stunning images with AI &mdash; Family Safe &#10003;</p>
+  <div style="display:flex;gap:.6rem;justify-content:center;flex-wrap:wrap;margin-top:.8rem;">
+    <span style="background:rgba(255,255,255,.15);border-radius:20px;padding:.25rem .75rem;font-size:.8rem;">&#10024; AI Powered</span>
+    <span style="background:rgba(255,255,255,.15);border-radius:20px;padding:.25rem .75rem;font-size:.8rem;">&#128106; Family Safe</span>
+    <span style="background:rgba(255,255,255,.15);border-radius:20px;padding:.25rem .75rem;font-size:.8rem;">&#128444; Multiple Styles</span>
+    <span style="background:rgba(255,255,255,.15);border-radius:20px;padding:.25rem .75rem;font-size:.8rem;">&#9889; Fast Generation</span>
+  </div>
 </header>
 
 <main>
@@ -788,30 +804,9 @@ _HTML = """<!DOCTYPE html>
           <option value="4">4</option>
         </select>
       </div>
-      <div>
-        <label for="provider">Provider</label>
-        <select id="provider" onchange="onProviderChange()">
-          <option value="auto">Auto (try in order)</option>
-          <option value="fal.ai">fal.ai</option>
-          <option value="huggingface">Hugging Face</option>
-          <option value="stability">Stability AI</option>
-          <option value="replicate">Replicate</option>
-          <option value="pollinations">Pollinations (free)</option>
-        </select>
-      </div>
     </div>
 
-    <div id="fal-model-row" class="fal-model-row">
-      <label for="fal-model">fal.ai Model / Quality</label>
-      <select id="fal-model">
-        <option value="fal-ai/flux/schnell">Fast — FLUX Schnell</option>
-        <option value="fal-ai/flux-pro">Pro — FLUX Pro</option>
-        <option value="fal-ai/stable-diffusion-v3-medium">SD3 — Stable Diffusion v3</option>
-        <option value="fal-ai/recraft-v3">Recraft v3 (photo-realistic)</option>
-      </select>
-    </div>
-
-    <button class="btn-primary" id="gen-btn" onclick="generateImages()">&#10024; Generate Images</button>
+    <button class="btn-primary" id="gen-btn" onclick="generateImages()">&#127912; Generate Images</button>
   </div>
 
   <div id="status-bar"><span class="spinner"></span><span id="status-text">Generating...</span></div>
@@ -819,17 +814,14 @@ _HTML = """<!DOCTYPE html>
   <div id="image-gallery"></div>
 </main>
 
+<footer style="text-align:center;padding:1.5rem 1rem;color:var(--muted);font-size:.85rem;border-top:1px solid var(--border);margin-top:2rem;">
+  &#127912; PureImage AI &nbsp;|&nbsp; &#10003; Family Safe AI Image Generation &nbsp;|&nbsp; &#9888;&#65039; AI-generated images may not always be perfect. Review before use.
+</footer>
+
 <script>
 function toggleAdvanced() {
   document.getElementById('advanced-section').classList.toggle('open');
 }
-
-function onProviderChange() {
-  const p = document.getElementById('provider').value;
-  const row = document.getElementById('fal-model-row');
-  row.classList.toggle('visible', p === 'fal.ai' || p === 'auto');
-}
-onProviderChange();
 
 function copyPrompt(btn) {
   const p = document.getElementById('prompt').value.trim();
@@ -858,8 +850,7 @@ async function generateImages() {
   errDiv.style.display = 'none';
   gallery.innerHTML = '';
 
-  const provider = document.getElementById('provider').value;
-  statusText.textContent = 'Generating with ' + (provider === 'auto' ? 'best available provider' : provider) + '...';
+  statusText.textContent = '\u2728 Creating your images...';
 
   try {
     const resp = await fetch('/generate', {
@@ -871,8 +862,6 @@ async function generateImages() {
         style: document.getElementById('style').value,
         aspect_ratio: document.getElementById('aspect-ratio').value,
         num_images: parseInt(document.getElementById('num-images').value, 10),
-        provider,
-        fal_model: document.getElementById('fal-model').value,
       })
     });
 
@@ -882,7 +871,7 @@ async function generateImages() {
       return;
     }
 
-    renderImages(data.images, data.provider_used);
+    renderImages(data.images, data.elapsed_ms);
   } catch(e) {
     showError('Network error: ' + e.message);
   } finally {
@@ -897,7 +886,7 @@ function showError(msg) {
   errDiv.style.display = 'block';
 }
 
-function renderImages(images, providerUsed) {
+function renderImages(images, elapsedMs) {
   const gallery = document.getElementById('image-gallery');
   gallery.innerHTML = '';
   if (!images || images.length === 0) {
@@ -908,7 +897,6 @@ function renderImages(images, providerUsed) {
     const card = document.createElement('div');
     card.className = 'img-card';
     const src = img.url;
-    const prov = escHtml(img.provider || providerUsed || 'AI');
 
     const imgEl = document.createElement('img');
     imgEl.alt = 'Generated image ' + (i + 1);
@@ -920,7 +908,7 @@ function renderImages(images, providerUsed) {
 
     const badge = document.createElement('span');
     badge.className = 'provider-badge';
-    badge.textContent = img.provider || providerUsed || 'AI';
+    badge.textContent = '\u2728 AI Generated';
 
     const dlBtn = document.createElement('button');
     dlBtn.className = 'btn-download';
@@ -937,6 +925,13 @@ function renderImages(images, providerUsed) {
     card.appendChild(footer);
     gallery.appendChild(card);
   });
+
+  if (elapsedMs) {
+    const info = document.createElement('p');
+    info.style.cssText = 'text-align:center;color:var(--muted);font-size:.85rem;margin-top:.5rem;';
+    info.textContent = 'Generated in ' + (elapsedMs / 1000).toFixed(1) + 's';
+    gallery.appendChild(info);
+  }
 }
 
 function escHtml(str) {
@@ -1033,39 +1028,60 @@ def generate():
         if len(raw_prompt) > _MAX_FIELD_LEN:
             return jsonify(error="Prompt is too long."), 400
 
-        negative_prompt = (d.get("negative_prompt") or "").strip()
+        user_negative = (d.get("negative_prompt") or "").strip()
         style = (d.get("style") or "none").strip().lower()
         aspect_ratio = (d.get("aspect_ratio") or "square").strip().lower()
         num_images = int(d.get("num_images") or 1)
         num_images = max(1, min(num_images, 4))
-        provider = (d.get("provider") or "auto").strip().lower()
-        fal_model = (d.get("fal_model") or "fal-ai/flux/schnell").strip()
+
+        # Silently sanitize prompt for family-safe content
+        sanitized_prompt = _sanitize_prompt(raw_prompt)
 
         if style and style != "none":
-            styled_prompt = _apply_style(raw_prompt, style)
+            styled_prompt = _apply_style(sanitized_prompt, style)
         else:
-            styled_prompt = raw_prompt
+            styled_prompt = sanitized_prompt
+
+        # Append family-safe suffix to every prompt
+        final_prompt = styled_prompt + FAMILY_SAFE_SUFFIX
+
+        # Merge user negative prompt with safety negatives
+        if user_negative:
+            final_negative = user_negative + ", " + SAFETY_NEGATIVE
+        else:
+            final_negative = SAFETY_NEGATIVE
 
         width, height = _get_dims(aspect_ratio)
 
-        try:
-            image_urls, provider_used = _generate_images(
-                styled_prompt, negative_prompt, width, height, num_images, provider, fal_model
-            )
-        except Exception as exc:
-            logger.error("Image generation failed: %s", exc)
-            return jsonify(error=str(exc)[:400]), 502
+        # Cache key based on final prompt + settings (robust serialization to avoid collisions)
+        cache_key = hashlib.sha256(
+            json.dumps([final_prompt, final_negative, aspect_ratio, num_images], sort_keys=True).encode()
+        ).hexdigest()
+        cached = _cache_get(cache_key)
+        if cached is not None:
+            return jsonify(**cached)
+
+        image_urls, provider_used = _generate_images(
+            final_prompt, final_negative, width, height, num_images
+        )
+
+        if not image_urls:
+            logger.error("All image providers failed")
+            return jsonify(error="Image generation is temporarily unavailable. Please try again in a moment."), 502
 
         elapsed_ms = int((time.time() - t0) * 1000)
-        images = [{"url": u, "provider": provider_used} for u in image_urls]
+        # Never expose provider name to users — just return image URLs
+        images = [{"url": u} for u in image_urls]
 
         entry = {
             "ts": time.time(),
-            "prompt": raw_prompt[:200],
-            "provider": provider_used,
+            "prompt_hash": hashlib.sha256(sanitized_prompt.encode()).hexdigest(),
+            "style": style,
+            "aspect_ratio": aspect_ratio,
+            "num_images": len(images),
+            "provider_used": provider_used,
             "elapsed_ms": elapsed_ms,
             "success": True,
-            "num_images": len(images),
         }
         with FEEDBACK_LOG_LOCK:
             FEEDBACK_LOG.append(entry)
@@ -1077,7 +1093,9 @@ def generate():
         except Exception:
             pass
 
-        return jsonify(images=images, provider_used=provider_used, elapsed_ms=elapsed_ms)
+        result = {"images": images, "elapsed_ms": elapsed_ms}
+        _cache_set(cache_key, result)
+        return jsonify(**result)
 
     except Exception:
         return _internal_error()
