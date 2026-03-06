@@ -11,7 +11,7 @@ import time
 import unicodedata
 import urllib.parse
 import requests
-from flask import Flask, request, jsonify, render_template_string
+from flask import Flask, request, jsonify, render_template_string, Response
 from groq import Groq
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s %(levelname)s %(name)s: %(message)s')
@@ -561,13 +561,6 @@ def _generate_via_pollinations(prompt, negative_prompt, width, height, num_image
     for i in range(min(num_images, 4)):
         seed_url = base_url + (f"&seed={i * 1000 + int(time.time()) % 10000}" if i > 0 else "")
         urls.append(seed_url)
-    # Validate that at least the first URL is reachable
-    try:
-        check = requests.head(urls[0], timeout=10, allow_redirects=True)
-        if check.status_code not in (200, 301, 302):
-            raise RuntimeError(f"Pollinations URL returned status {check.status_code}")
-    except Exception as exc:
-        raise RuntimeError(f"Pollinations image not reachable: {exc}")
     return urls
 
 
@@ -1036,28 +1029,31 @@ def health():
 
 @app.route("/proxy_image")
 def proxy_image():
-    from urllib.parse import urlparse, urlunparse
-    from flask import Response
-    url = request.args.get("url", "")
+    url = request.args.get("url", "").strip()
+    if not url:
+        return jsonify(error="Missing url parameter"), 400
+    try:
+        parsed = urllib.parse.urlparse(url)
+    except Exception:
+        return jsonify(error="Invalid URL"), 400
     allowed_hosts = (
         "image.pollinations.ai",
         "fal.media", "fal.run",
         "replicate.delivery",
         "pbxt.replicate.delivery",
     )
-    parsed = urlparse(url)
     netloc = parsed.netloc.split(":")[0]  # strip port if present
-    if not url or parsed.scheme not in ("http", "https") or not any(
+    if parsed.scheme not in ("http", "https") or not any(
         netloc == h or netloc.endswith("." + h) for h in allowed_hosts
     ):
-        return jsonify(error="Invalid or disallowed image URL"), 400
+        return jsonify(error="Disallowed image URL"), 400
     # Reconstruct URL from validated components to prevent SSRF bypass
-    safe_url = urlunparse((parsed.scheme, parsed.netloc, parsed.path, "", parsed.query, ""))
+    safe_url = urllib.parse.urlunparse((parsed.scheme, parsed.netloc, parsed.path, "", parsed.query, ""))
     try:
-        resp = requests.get(safe_url, timeout=30)
+        resp = requests.get(safe_url, timeout=30, stream=True)
         if resp.status_code != 200:
             return jsonify(error="Image fetch failed"), 502
-        content_type = resp.headers.get("Content-Type", "image/jpeg")
+        content_type = (resp.headers.get("Content-Type") or "image/jpeg").split(";")[0].strip()
         return Response(resp.content, status=200, content_type=content_type)
     except Exception as exc:
         logger.warning("proxy_image failed for %s: %s", safe_url, exc)
