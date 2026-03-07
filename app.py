@@ -745,7 +745,7 @@ _HTML = """<!DOCTYPE html>
 </head>
 <body>
 <header>
-  <h1>PureImage AI</h1>
+  <a href="/" style="color:inherit;text-decoration:none;" title="Return to home page"><h1>PureImage AI</h1></a>
   <p>Create stunning images with AI &mdash; Family Safe &#10003;</p>
   <div style="display:flex;gap:.6rem;justify-content:center;flex-wrap:wrap;margin-top:.8rem;">
     <span style="background:rgba(255,255,255,.15);border-radius:20px;padding:.25rem .75rem;font-size:.8rem;">&#10024; AI Powered</span>
@@ -915,7 +915,7 @@ function renderImages(images, elapsedMs) {
     };
 
     // Use proxy for external URLs to avoid CORS issues
-    const displaySrc = src.startsWith('data:') ? src : '/proxy_image?url=' + encodeURIComponent(src);
+    const displaySrc = src.startsWith('data:') ? src : '/proxy_image?url=' + encodeURIComponent(src) + '&t=' + Date.now();
     imgEl.src = displaySrc;
 
     const footer = document.createElement('div');
@@ -1110,14 +1110,6 @@ def generate():
 
         width, height = _get_dims(aspect_ratio)
 
-        # Cache key based on final prompt + settings (robust serialization to avoid collisions)
-        cache_key = hashlib.sha256(
-            json.dumps([final_prompt, final_negative, aspect_ratio, num_images], sort_keys=True).encode()
-        ).hexdigest()
-        cached = _cache_get(cache_key)
-        if cached is not None:
-            return jsonify(**cached)
-
         image_urls, provider_used = _generate_images(
             final_prompt, final_negative, width, height, num_images
         )
@@ -1151,7 +1143,6 @@ def generate():
             pass
 
         result = {"images": images, "elapsed_ms": elapsed_ms}
-        _cache_set(cache_key, result)
         return jsonify(**result)
 
     except Exception:
