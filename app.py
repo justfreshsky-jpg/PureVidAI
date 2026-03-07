@@ -2,9 +2,11 @@ import os
 os.environ.setdefault('HTTPX_PROXIES', 'null')  # Fix Render/httpx proxies bug
 import base64
 import collections
+import concurrent.futures
 import hashlib
 import json
 import logging
+import random
 import re
 import threading
 import time
@@ -459,7 +461,7 @@ def _generate_via_huggingface(prompt, negative_prompt, width, height, num_images
         if image_b64:
             urls.append(image_b64)
         else:
-            raise RuntimeError("HuggingFace returned no image data")
+            logger.warning("HuggingFace failed to generate image %d/%d; skipping", len(urls) + 1, min(num_images, 4))
     if not urls:
         raise RuntimeError("HuggingFace returned no images")
     return urls
@@ -558,10 +560,25 @@ def _generate_via_replicate(prompt, negative_prompt, width, height, num_images, 
 def _generate_via_pollinations(prompt, negative_prompt, width, height, num_images, **kwargs):
     encoded = urllib.parse.quote(prompt)
     base_url = f"https://image.pollinations.ai/prompt/{encoded}?width={width}&height={height}&nologo=true&safe=1"
-    urls = []
-    for i in range(min(num_images, 4)):
-        seed_url = base_url + (f"&seed={i * 1000 + int(time.time()) % 10000}" if i > 0 else "")
-        urls.append(seed_url)
+    base_seed = random.randint(1, 999999) + int(time.time()) % 10000
+    candidates = [(base_seed + i * 1000, base_url + f"&seed={base_seed + i * 1000}") for i in range(min(num_images, 4))]
+
+    def _validate(seed_and_url):
+        seed, url = seed_and_url
+        try:
+            resp = requests.head(url, timeout=10, allow_redirects=True)
+            if resp.status_code == 200 and resp.headers.get("content-type", "").startswith("image/"):
+                return url
+            logger.warning("Pollinations URL validation failed for seed %d: status %d", seed, resp.status_code)
+        except Exception as exc:
+            logger.warning("Pollinations URL validation error for seed %d: %s", seed, exc)
+        return None
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=len(candidates)) as executor:
+        results = list(executor.map(_validate, candidates))
+    urls = [u for u in results if u]
+    if not urls:
+        raise RuntimeError("Pollinations returned no valid image URLs")
     return urls
 
 
@@ -588,8 +605,52 @@ def _generate_images(prompt, negative_prompt, width, height, num_images):
             logger.warning("Image provider %s failed: %s", name, exc)
             errors.append(f"{name}: {exc}")
             continue
+    # Retry Pollinations once more with a fresh seed before giving up
+    logger.warning("All providers failed; retrying Pollinations fallback")
+    try:
+        urls = _generate_via_pollinations(prompt, negative_prompt, width, height, num_images)
+        if urls:
+            logger.info("Images generated via pollinations (retry)")
+            return urls, "pollinations"
+    except Exception as exc:
+        errors.append(f"pollinations_retry: {exc}")
     logger.error("All image providers failed: %s", " | ".join(errors))
     return None, None
+
+
+# ── RESPONSE CACHE ────────────────────────────────────────────
+_GENERATE_CACHE: dict = {}
+_GENERATE_CACHE_TTL = 300  # seconds
+_GENERATE_CACHE_LOCK = threading.Lock()
+
+
+def _cache_key(prompt, negative_prompt, style, aspect_ratio, num_images):
+    """Return a stable string key for the generate response cache."""
+    raw = json.dumps([prompt, negative_prompt, style, aspect_ratio, num_images])
+    return hashlib.sha256(raw.encode()).hexdigest()
+
+
+def _cache_get(key):
+    """Return cached (image_urls, provider_used) or (None, None) if missing/expired."""
+    with _GENERATE_CACHE_LOCK:
+        entry = _GENERATE_CACHE.get(key)
+        if entry and (time.time() - entry["ts"]) < _GENERATE_CACHE_TTL:
+            return entry["image_urls"], entry["provider_used"]
+    return None, None
+
+
+def _cache_set(key, image_urls, provider_used):
+    """Store image results in cache and prune expired entries."""
+    with _GENERATE_CACHE_LOCK:
+        _GENERATE_CACHE[key] = {
+            "ts": time.time(),
+            "image_urls": image_urls,
+            "provider_used": provider_used,
+        }
+        now = time.time()
+        expired = [k for k, v in _GENERATE_CACHE.items() if (now - v["ts"]) >= _GENERATE_CACHE_TTL]
+        for k in expired:
+            del _GENERATE_CACHE[k]
 
 
 # ── UI HTML ───────────────────────────────────────────────────
@@ -906,6 +967,9 @@ function renderImages(images, elapsedMs) {
     imgEl.style.minHeight = '280px';
     imgEl.loading = 'lazy';
 
+    // Use proxy for external URLs to avoid CORS issues
+    const displaySrc = src.startsWith('data:') ? src : '/proxy_image?url=' + encodeURIComponent(src) + '&t=' + Date.now();
+
     imgEl.onerror = function() {
       console.error('Image failed to load:', displaySrc);
       const placeholder = document.createElement('div');
@@ -914,8 +978,6 @@ function renderImages(images, elapsedMs) {
       this.replaceWith(placeholder);
     };
 
-    // Use proxy for external URLs to avoid CORS issues
-    const displaySrc = src.startsWith('data:') ? src : '/proxy_image?url=' + encodeURIComponent(src) + '&t=' + Date.now();
     imgEl.src = displaySrc;
 
     const footer = document.createElement('div');
@@ -1110,9 +1172,16 @@ def generate():
 
         width, height = _get_dims(aspect_ratio)
 
-        image_urls, provider_used = _generate_images(
-            final_prompt, final_negative, width, height, num_images
-        )
+        ck = _cache_key(final_prompt, final_negative, style, aspect_ratio, num_images)
+        image_urls, provider_used = _cache_get(ck)
+        from_cache = image_urls is not None
+
+        if not from_cache:
+            image_urls, provider_used = _generate_images(
+                final_prompt, final_negative, width, height, num_images
+            )
+            if image_urls:
+                _cache_set(ck, image_urls, provider_used)
 
         if not image_urls:
             logger.error("All image providers failed")
