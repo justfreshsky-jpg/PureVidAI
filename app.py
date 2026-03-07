@@ -1268,6 +1268,8 @@ def enhance_prompt():
         raw = (d.get("prompt") or "").strip()
         if not raw:
             return jsonify(error="Please enter a prompt."), 400
+        if len(raw) > _MAX_FIELD_LEN:
+            return jsonify(error="Prompt is too long."), 400
         if not _has_llm_key():
             return jsonify(
                 error=(
