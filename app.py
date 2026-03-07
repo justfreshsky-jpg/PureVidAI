@@ -571,19 +571,25 @@ def _generate_via_pollinations(prompt, negative_prompt, width, height, num_image
     base_seed = random.randint(1, 999999) + int(time.time()) % 10000
     candidates = [(base_seed + i * 1000, base_url + f"&seed={base_seed + i * 1000}") for i in range(min(num_images, 4))]
 
-    def _validate(seed_and_url):
+    def _fetch(seed_and_url):
         seed, url = seed_and_url
         try:
-            resp = requests.head(url, timeout=10, allow_redirects=True)
-            if resp.status_code == 200 and resp.headers.get("content-type", "").startswith("image/"):
-                return url
-            logger.warning("Pollinations URL validation failed for seed %d: status %d", seed, resp.status_code)
+            # Use GET (not HEAD) — Pollinations generates the image on first GET request.
+            resp = requests.get(url, timeout=30, allow_redirects=True)
+            ct = resp.headers.get("content-type", "")
+            if resp.status_code == 200 and ct.startswith("image/"):
+                # Embed as data-URI so the browser can render it immediately without
+                # needing a second round-trip back to Pollinations.
+                b64 = base64.b64encode(resp.content).decode()
+                return f"data:{ct.split(';')[0].strip()};base64,{b64}"
+            logger.warning("Pollinations URL validation failed for seed %d: status %d ct=%s",
+                           seed, resp.status_code, ct)
         except Exception as exc:
             logger.warning("Pollinations URL validation error for seed %d: %s", seed, exc)
         return None
 
     with concurrent.futures.ThreadPoolExecutor(max_workers=len(candidates)) as executor:
-        results = list(executor.map(_validate, candidates))
+        results = list(executor.map(_fetch, candidates))
     urls = [u for u in results if u]
     if not urls:
         raise RuntimeError("Pollinations returned no valid image URLs")
@@ -626,7 +632,7 @@ def _generate_images(prompt, negative_prompt, width, height, num_images):
     return None, None
 
 
-# ── RESPONSE CACHE ────────────────────────────────────────────
+# ── GENERATE RESPONSE CACHE ──────────────────────────────────
 _GENERATE_CACHE: dict = {}
 _GENERATE_CACHE_TTL = 300  # seconds
 _GENERATE_CACHE_LOCK = threading.Lock()
@@ -638,7 +644,7 @@ def _cache_key(prompt, negative_prompt, style, aspect_ratio, num_images):
     return hashlib.sha256(raw.encode()).hexdigest()
 
 
-def _cache_get(key):
+def _gen_cache_get(key):
     """Return cached (image_urls, provider_used) or (None, None) if missing/expired."""
     with _GENERATE_CACHE_LOCK:
         entry = _GENERATE_CACHE.get(key)
@@ -647,7 +653,7 @@ def _cache_get(key):
     return None, None
 
 
-def _cache_set(key, image_urls, provider_used):
+def _gen_cache_set(key, image_urls, provider_used):
     """Store image results in cache and prune expired entries."""
     with _GENERATE_CACHE_LOCK:
         _GENERATE_CACHE[key] = {
@@ -1200,7 +1206,7 @@ def generate():
         width, height = _get_dims(aspect_ratio)
 
         ck = _cache_key(final_prompt, final_negative, style, aspect_ratio, num_images)
-        image_urls, provider_used = _cache_get(ck)
+        image_urls, provider_used = _gen_cache_get(ck)
         from_cache = image_urls is not None
 
         if not from_cache:
@@ -1208,11 +1214,21 @@ def generate():
                 final_prompt, final_negative, width, height, num_images
             )
             if image_urls:
-                _cache_set(ck, image_urls, provider_used)
+                _gen_cache_set(ck, image_urls, provider_used)
 
         if not image_urls:
+            no_keys = not any([FAL_KEY, HF_KEY, STABILITY_KEY, REPLICATE_KEY])
+            if no_keys:
+                logger.error("All image providers failed — no paid provider keys are configured")
+                return jsonify(
+                    error=(
+                        "Image generation is unavailable: no image provider API keys are configured. "
+                        "Set at least one of FAL_KEY, HF_KEY, STABILITY_KEY, or REPLICATE_KEY. "
+                        "Alternatively, Pollinations (free, no key needed) may be temporarily unreachable."
+                    )
+                ), 503
             logger.error("All image providers failed")
-            return jsonify(error="Image generation is temporarily unavailable. Please try again in a moment."), 502
+            return jsonify(error="Image generation failed. All providers are currently unavailable. Please try again in a moment."), 502
 
         elapsed_ms = int((time.time() - t0) * 1000)
         # Never expose provider name to users — just return image URLs
@@ -1253,7 +1269,13 @@ def enhance_prompt():
         if not raw:
             return jsonify(error="Please enter a prompt."), 400
         if not _has_llm_key():
-            return jsonify(error="No LLM key configured for prompt enhancement."), 503
+            return jsonify(
+                error=(
+                    "Prompt enhancement is unavailable: no LLM API key is configured. "
+                    "Set at least one of GROQ_KEY, GEMINI_KEY, CEREBRAS_KEY, COHERE_KEY, "
+                    "MISTRAL_KEY, OPENROUTER_KEY, or HF_KEY."
+                )
+            ), 503
 
         enhanced = llm(
             "You are an expert AI image prompt engineer. Expand and enhance the user's prompt to be more "
@@ -1261,7 +1283,10 @@ def enhance_prompt():
             raw,
         )
         if not enhanced:
-            return jsonify(error="Enhancement failed. Please try again."), 502
+            return jsonify(error="All LLM providers failed to enhance your prompt. Please try again later."), 502
+        if not isinstance(enhanced, str):
+            logger.error("llm() returned unexpected type %s", type(enhanced))
+            return jsonify(error="Enhancement returned an unexpected result. Please try again."), 500
         return jsonify(enhanced=_strip_surrogates(enhanced))
     except Exception:
         return _internal_error()

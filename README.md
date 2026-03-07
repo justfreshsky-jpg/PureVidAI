@@ -30,15 +30,24 @@ AI-powered image generation web app. Type a text prompt and generate stunning im
 
 Pollinations.ai requires no key and is always used as the final fallback.
 
+> **Minimum working setup (no keys):** Image generation works out of the box via Pollinations.ai,
+> which is the free final fallback and requires no API key.
+> Set at least one paid provider key (FAL_KEY, HF_KEY, etc.) for better reliability, speed, and resolution.
+
 ### Text LLM Keys (for prompt enhancement, optional)
 | Variable | Provider |
 |---|---|
-| `GROQ_KEY` | Groq (Llama 3.3 70B) |
+| `GROQ_KEY` | Groq (Llama 3.3 70B) — recommended, has a generous free tier |
 | `CEREBRAS_KEY` | Cerebras |
 | `GEMINI_KEY` | Google Gemini |
 | `COHERE_KEY` | Cohere |
 | `MISTRAL_KEY` | Mistral |
 | `OPENROUTER_KEY` | OpenRouter |
+| `HF_KEY` | Hugging Face (also used for image generation) |
+
+> **Note:** The **Enhance Prompt** button is only shown in the UI when at least one LLM key is
+> configured. Without a key the button is hidden and the `/enhance_prompt` endpoint returns 503
+> with an actionable error message.
 
 ### App Config
 | Variable | Default | Description |
@@ -49,11 +58,29 @@ Pollinations.ai requires no key and is always used as the final fallback.
 ## Run Locally
 
 ```bash
+# 1. Install dependencies
 pip install -r requirements.txt
+
+# 2. (Optional) configure API keys
+export GROQ_KEY=your-groq-key
+export FAL_KEY=your-fal-key
+# ... other keys as needed
+
+# 3. Start the server
 python app.py
 ```
 
 Then open http://localhost:8080.
+
+> **No keys?** The app still works — Pollinations.ai (free, no key) is always the final fallback
+> in the image provider chain. Set `GROQ_KEY` (or another LLM key) to also enable **Enhance Prompt**.
+
+## Run Tests
+
+```bash
+pip install pytest
+pytest tests/ -v
+```
 
 ## Deploy on Render
 
@@ -83,3 +110,16 @@ Generated images from external providers are served through the `/proxy_image` e
 
 - Visit `/debug` to check which API keys are configured and retrieve the Cloud Run trace ID.
 - Check Cloud Run logs for lines containing `Unhandled route error` — each entry includes a `request_id` that is also returned in the JSON error response to the client, making it easy to correlate user-reported errors with server logs.
+
+## Error Reference
+
+| Endpoint | Status | Cause | Resolution |
+|---|---|---|---|
+| `/enhance_prompt` | 400 | Empty prompt | Enter a prompt |
+| `/enhance_prompt` | 503 | No LLM key configured | Set `GROQ_KEY` or another LLM key |
+| `/enhance_prompt` | 502 | All LLM providers failed | Check provider API key validity / quota |
+| `/generate` | 400 | Empty prompt | Enter a prompt |
+| `/generate` | 429 | Rate limit exceeded | Wait ~1 minute |
+| `/generate` | 503 | No image provider keys and Pollinations unreachable | Set `FAL_KEY`, `HF_KEY`, etc. |
+| `/generate` | 502 | All providers failed | Check provider API key validity / quota |
+
