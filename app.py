@@ -745,7 +745,7 @@ _HTML = """<!DOCTYPE html>
 </head>
 <body>
 <header>
-  <a href="/" style="color:inherit;text-decoration:none;" title="Return to home page"><h1>PureImage AI</h1></a>
+  <a href="/" style="color:inherit;text-decoration:none;"><h1>PureImage AI</h1></a>
   <p>Create stunning images with AI &mdash; Family Safe &#10003;</p>
   <div style="display:flex;gap:.6rem;justify-content:center;flex-wrap:wrap;margin-top:.8rem;">
     <span style="background:rgba(255,255,255,.15);border-radius:20px;padding:.25rem .75rem;font-size:.8rem;">&#10024; AI Powered</span>
