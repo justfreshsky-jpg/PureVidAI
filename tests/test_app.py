@@ -97,6 +97,12 @@ class TestEnhancePromptEndpoint(unittest.TestCase):
         resp = _post_json(self.client, "/enhance_prompt", {"prompt": "   "})
         self.assertEqual(resp.status_code, 400)
 
+    def test_prompt_too_long_returns_400(self):
+        resp = _post_json(self.client, "/enhance_prompt", {"prompt": "x" * 4001})
+        self.assertEqual(resp.status_code, 400)
+        data = resp.get_json()
+        self.assertIn("error", data)
+
     def test_no_llm_key_returns_503(self):
         """When no LLM API keys are present the endpoint must return 503
         with an actionable message — NOT a generic 500."""
