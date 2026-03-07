@@ -1006,6 +1006,11 @@ async function enhancePrompt(btn) {
 """
 
 
+def _strip_surrogates(s: str) -> str:
+    """Remove surrogate characters (U+D800–U+DFFF) that are invalid in UTF-8."""
+    return re.sub(r'[\ud800-\udfff]', '', s)
+
+
 def _render_html():
     if _has_llm_key():
         html = _HTML.replace("ENHANCE_BTN_PLACEHOLDER", _ENHANCE_BTN_HTML)
@@ -1013,7 +1018,7 @@ def _render_html():
     else:
         html = _HTML.replace("ENHANCE_BTN_PLACEHOLDER", "")
         html = html.replace("ENHANCE_JS_PLACEHOLDER", "function enhancePrompt(){}")
-    return html
+    return _strip_surrogates(html)
 
 
 # ── ROUTES ────────────────────────────────────────────────────
@@ -1164,7 +1169,7 @@ def enhance_prompt():
         )
         if not enhanced:
             return jsonify(error="Enhancement failed. Please try again."), 502
-        return jsonify(enhanced=enhanced)
+        return jsonify(enhanced=_strip_surrogates(enhanced))
     except Exception:
         return _internal_error()
 
