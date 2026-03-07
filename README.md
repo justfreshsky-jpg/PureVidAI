@@ -62,3 +62,24 @@ Then open http://localhost:8080.
 3. Set **Start Command**: `gunicorn app:app`
 4. Add environment variables for your API keys
 5. Deploy — Pollinations.ai works with no keys, so images generate immediately
+
+## Deploy on Google Cloud Run
+
+1. Build and push the Docker image:
+   ```bash
+   gcloud builds submit --tag gcr.io/PROJECT_ID/pureimage-ai
+   ```
+2. Deploy the service:
+   ```bash
+   gcloud run deploy pureimage-ai --image gcr.io/PROJECT_ID/pureimage-ai --platform managed --allow-unauthenticated
+   ```
+3. Add environment variables for your API keys via the Cloud Run console or `--set-env-vars`.
+
+### Image Proxying
+
+Generated images from external providers are served through the `/proxy_image` endpoint to avoid CORS issues. The allowed upstream hosts are defined in `app.py` in the `allowed_hosts` tuple inside `proxy_image()`. If a new image provider returns URLs from a host not in the list, add it there.
+
+### Debugging on Cloud Run
+
+- Visit `/debug` to check which API keys are configured and retrieve the Cloud Run trace ID.
+- Check Cloud Run logs for lines containing `Unhandled route error` — each entry includes a `request_id` that is also returned in the JSON error response to the client, making it easy to correlate user-reported errors with server logs.

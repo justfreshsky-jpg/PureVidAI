@@ -12,6 +12,7 @@ import threading
 import time
 import unicodedata
 import urllib.parse
+import uuid
 import requests
 from flask import Flask, request, jsonify, render_template_string, Response
 from groq import Groq
@@ -27,6 +28,7 @@ STABILITY_KEY   = os.environ.get("STABILITY_KEY")
 REPLICATE_KEY   = os.environ.get("REPLICATE_KEY")
 PUREIMAGE_LOG_PATH = os.environ.get("PUREIMAGE_LOG_PATH", "/tmp/pureimage_feedback.log.jsonl")
 PROXY_USER_AGENT = "PureImageAI/1.0"
+PROXY_IMAGE_CACHE_MAX_AGE = 300  # seconds (5 minutes)
 
 client = Groq(api_key=GROQ_KEY) if GROQ_KEY else None
 
@@ -146,9 +148,15 @@ def _sanitize_prompt(prompt: str) -> str:
     return result.strip()
 
 
+def _get_request_id() -> str:
+    """Return the X-Request-Id header value or generate a new UUID4."""
+    return request.headers.get("X-Request-Id") or str(uuid.uuid4())
+
+
 def _internal_error():
-    logger.exception("Unhandled route error")
-    return jsonify(error="Internal server error. Please try again."), 500
+    req_id = _get_request_id()
+    logger.exception("Unhandled route error path=%s request_id=%s", request.path, req_id)
+    return jsonify(error="Internal server error. Please try again.", request_id=req_id), 500
 
 
 # ── RESPONSE CACHE (LRU, TTL 1 hr) ───────────────────────────
@@ -1096,6 +1104,21 @@ def health():
     return jsonify(status="ok")
 
 
+@app.route("/debug")
+def debug():
+    """Lightweight self-test route — shows key presence and Cloud Run request id."""
+    cloud_run_request_id = request.headers.get("X-Cloud-Trace-Context") or request.headers.get("X-Request-Id")
+    return jsonify(
+        keys={
+            "FAL_KEY": "configured" if FAL_KEY else "not configured",
+            "HF_KEY": "configured" if HF_KEY else "not configured",
+            "STABILITY_KEY": "configured" if STABILITY_KEY else "not configured",
+            "REPLICATE_KEY": "configured" if REPLICATE_KEY else "not configured",
+        },
+        cloud_run_request_id=cloud_run_request_id,
+    )
+
+
 @app.route("/proxy_image")
 def proxy_image():
     url = request.args.get("url", "").strip()
@@ -1110,6 +1133,7 @@ def proxy_image():
         "fal.media",
         "fal.run",
         "fal.ai",
+        "cdn.fal.ai",
         "storage.googleapis.com",
         "replicate.delivery",
         "huggingface.co",
@@ -1123,11 +1147,14 @@ def proxy_image():
     # Reconstruct URL from validated components to prevent SSRF bypass
     safe_url = urllib.parse.urlunparse((parsed.scheme, parsed.netloc, parsed.path, "", parsed.query, ""))
     try:
-        resp = requests.get(safe_url, timeout=60, stream=True, headers={"User-Agent": PROXY_USER_AGENT})
+        resp = requests.get(safe_url, timeout=60, stream=True, allow_redirects=True,
+                            headers={"User-Agent": PROXY_USER_AGENT})
         if resp.status_code != 200:
-            return jsonify(error="Image fetch failed"), 502
+            return jsonify(error=f"Image fetch failed (upstream status {resp.status_code})"), 502
         content_type = (resp.headers.get("Content-Type") or "image/jpeg").split(";")[0].strip()
-        return Response(resp.content, status=200, content_type=content_type)
+        response = Response(resp.content, status=200, content_type=content_type)
+        response.headers["Cache-Control"] = f"public, max-age={PROXY_IMAGE_CACHE_MAX_AGE}"
+        return response
     except Exception as exc:
         logger.warning("proxy_image failed for %s: %s", safe_url, exc)
         return jsonify(error="Could not fetch image"), 502
